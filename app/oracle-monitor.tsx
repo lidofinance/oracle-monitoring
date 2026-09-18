@@ -1499,13 +1499,6 @@ export default function OracleMonitor() {
     }
     return map;
   }, [data]);
-  const contractSeatCount =
-    data?.members.filter(
-      (member) => holderByMember.get(member.address)?.contract === member.address,
-    ).length ?? 0;
-  const pendingRotationCount =
-    data?.holders.filter((holder) => holder.state?.pendingDelegateAddress)
-      .length ?? 0;
   const nowSeconds = Math.floor((updatedAt?.getTime() ?? 0) / 1000);
 
   // Members that did not vote for the current or the previous frame.
@@ -1735,23 +1728,6 @@ export default function OracleMonitor() {
                 <span>Members</span>
                 <strong>{data.members.length}</strong>
                 <small>authoritative set</small>
-              </div>
-              <div
-                className={`metric ${
-                  contractSeatCount === data.members.length && !pendingRotationCount
-                    ? "healthy"
-                    : "warning"
-                }`}
-              >
-                <span>EDF contracts</span>
-                <strong>{contractSeatCount}</strong>
-                <small>
-                  {pendingRotationCount
-                    ? `${pendingRotationCount} pending delegate change`
-                    : contractSeatCount === data.members.length
-                      ? "all seats via contract"
-                      : `${data.members.length - contractSeatCount} via legacy EOA`}
-                </small>
               </div>
               <div
                 className={`metric ${lowBalanceCount ? "warning" : "healthy"}`}

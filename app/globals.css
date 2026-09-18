@@ -285,7 +285,7 @@ input:focus-visible {
   border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
-  grid-template-columns: minmax(260px, 1.4fr) repeat(5, minmax(120px, 0.5fr));
+  grid-template-columns: minmax(300px, 1.5fr) repeat(4, minmax(130px, 0.5fr));
   margin-bottom: 18px;
   min-height: 156px;
   overflow: hidden;
