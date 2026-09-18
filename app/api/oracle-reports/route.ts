@@ -4,7 +4,10 @@ import { Interface } from "ethers";
 import {
   type OracleModule,
   type ParsedOracleReport,
+  type RawTransaction,
+  type ReportCandidate,
   parseOracleReport,
+  unwrapReportTransaction,
 } from "../../oracle-reports";
 
 type NetworkKey = "mainnet" | "hoodi";
@@ -15,13 +18,29 @@ type RpcResponse<T> = {
   error?: { message?: string };
 };
 
-const CONFIG = {
+// Report receivers (the oracle contracts that accept submitReportData) per
+// network. A module missing on a network is simply not tracked there.
+const CONFIG: Record<
+  NetworkKey,
+  {
+    explorer: string;
+    stakingRouter: string;
+    rpcs: readonly string[];
+    contracts: Partial<Record<OracleModule, string>>;
+  }
+> = {
   mainnet: {
     explorer: "https://etherscan.io",
     stakingRouter: "0xFdDf38947aFB03C621C71b06C9C70bce73f12999",
+    // Endpoints must serve eth_getLogs over 10k-block ranges for the whole
+    // lookback window in small batches. publicnode rejects ranges older than
+    // a few thousand blocks and flashbots keeps only recent logs, so they are
+    // fallbacks for the other calls.
     rpcs: [
-      "https://ethereum.publicnode.com",
-      "https://eth-mainnet.g.alchemy.com/v2/demo",
+      "https://rpc.mevblocker.io",
+      "https://gateway.tenderly.co/public/mainnet",
+      "https://rpc.flashbots.net",
+      "https://ethereum-rpc.publicnode.com",
     ],
     contracts: {
       ao: "0x852deD011285fe67063a08005c71a85690503Cee",
@@ -41,10 +60,11 @@ const CONFIG = {
       ao: "0xcb883B1bD0a41512b42D2dB267F2A2cd919FB216",
       vebo: "0x8664d394C2B3278F26A1B44B967aEf99707eeAB2",
       csm: "0xe7314f561B2e72f9543F1004e741bab6Fc51028B",
+      csm_0x02: "0x9B8bBA11bbE1a351CC8dD1CFCa6719FF7274A208",
       cm: "0x5D2F27000C80f6f7A03015Fd49dB7FEba3fBfa83",
     },
   },
-} as const;
+};
 
 const PROCESSING_STARTED_TOPIC =
   "0xf73febded7d4502284718948a3e1d75406151c6326bde069424a584a4f6af87a";
@@ -61,24 +81,6 @@ const CURATED_MODULE = new Interface([
 const META_REGISTRY = new Interface([
   "function getOperatorMetadata(uint256) view returns ((string name,string description,bool ownerEditsRestricted))",
 ]);
-const DELEGATION_CONTRACT = new Interface([
-  "function execute(address target,bytes data) payable returns (bytes result)",
-]);
-
-type RpcTransaction = {
-  hash: string;
-  from: string;
-  to: string | null;
-  input: string;
-  blockNumber: string;
-};
-
-type ReportCandidate = {
-  hash: string;
-  module: OracleModule;
-  address: string;
-};
-
 async function explorerHashes(explorer: string, address: string) {
   const response = await fetch(`${explorer}/address/${address}`, {
     headers: {
@@ -95,10 +97,40 @@ async function explorerHashes(explorer: string, address: string) {
   return [...new Set(hashes)].slice(0, 40);
 }
 
+// Public endpoints cap the number of calls per JSON-RPC batch; log queries
+// are the heaviest, so they get the smallest batches.
+const LOG_BATCH_SIZE = 5;
+const CALL_BATCH_SIZE = 40;
+
+// Send JSON-RPC calls in batches of `chunkSize`, trying the endpoints in
+// order for each batch. Per-item errors come back as null. With
+// `rejectAllErrors` an endpoint that fails every item of a batch (rate
+// limit, unsupported block range) is skipped instead.
 async function rpcBatch<T>(
   rpcs: readonly string[],
   method: string,
   params: unknown[][],
+  { rejectAllErrors = false, chunkSize = CALL_BATCH_SIZE } = {},
+) {
+  const results: Array<T | null> = [];
+  for (let start = 0; start < params.length; start += chunkSize) {
+    results.push(
+      ...(await rpcBatchOnce<T>(
+        rpcs,
+        method,
+        params.slice(start, start + chunkSize),
+        rejectAllErrors,
+      )),
+    );
+  }
+  return results;
+}
+
+async function rpcBatchOnce<T>(
+  rpcs: readonly string[],
+  method: string,
+  params: unknown[][],
+  rejectAllErrors: boolean,
 ) {
   let lastError: unknown;
   for (const rpc of rpcs) {
@@ -119,6 +151,13 @@ async function rpcBatch<T>(
       const payload = (await response.json()) as RpcResponse<T>[];
       if (!Array.isArray(payload)) throw new Error("RPC rejected batch request");
       const byId = new Map(payload.map((item) => [item.id, item]));
+      if (
+        rejectAllErrors &&
+        payload.length &&
+        payload.every((item) => item.error)
+      ) {
+        throw new Error(payload[0].error?.message ?? "RPC rejected batch");
+      }
       return params.map((_, index) => byId.get(index + 1)?.result ?? null);
     } catch (error) {
       lastError = error;
@@ -127,10 +166,14 @@ async function rpcBatch<T>(
   throw lastError ?? new Error("No RPC endpoint responded");
 }
 
+// Discover report transactions through the ProcessingStarted event the
+// receiver emits on submitReportData. Unlike the explorer address page this
+// also finds calls that arrive through EDF DelegationContracts, where the
+// receiver is not the transaction recipient.
 async function rpcReportCandidates(
   rpcs: readonly string[],
-  contracts: Record<OracleModule, string>,
-) {
+  contracts: Partial<Record<OracleModule, string>>,
+): Promise<ReportCandidate[]> {
   const [latestHex] = await rpcBatch<string>(rpcs, "eth_blockNumber", [[]]);
   if (!latestHex) throw new Error("Latest block was unavailable");
   const latest = Number.parseInt(latestHex, 16);
@@ -148,69 +191,74 @@ async function rpcReportCandidates(
   }
   const results = await rpcBatch<
     Array<{ address: string; transactionHash: string }>
-  >(rpcs, "eth_getLogs", ranges);
+  >(rpcs, "eth_getLogs", ranges, {
+    rejectAllErrors: true,
+    chunkSize: LOG_BATCH_SIZE,
+  });
+  const entries = Object.entries(contracts) as Array<[OracleModule, string]>;
   const moduleByAddress = new Map(
-    (Object.entries(contracts) as Array<[OracleModule, string]>).map(
-      ([module, address]) => [address.toLowerCase(), module],
-    ),
+    entries.map(([module, address]) => [address.toLowerCase(), module]),
   );
   const candidates = results.flatMap((logs) =>
     (logs ?? []).flatMap((log) => {
-      const reportModule = moduleByAddress.get(log.address.toLowerCase());
+      const address = log.address.toLowerCase();
+      const reportModule = moduleByAddress.get(address);
       return reportModule
         ? [
             {
               hash: log.transactionHash.toLowerCase(),
               module: reportModule,
-              address: contracts[reportModule],
+              address,
             },
           ]
         : [];
     }),
   );
-  return (Object.keys(contracts) as OracleModule[]).flatMap((reportModule) =>
+  return entries.flatMap(([reportModule]) =>
     candidates
       .filter((candidate) => candidate.module === reportModule)
       .slice(-40),
   );
 }
 
-function unwrapReportTransaction(
-  transaction: RpcTransaction,
-  candidate: ReportCandidate,
-) {
-  if (!transaction.to) return null;
-  if (transaction.to.toLowerCase() === candidate.address.toLowerCase()) {
-    return {
-      transaction: transaction as RpcTransaction & { to: string },
-      module: candidate.module,
-    };
-  }
-
-  try {
-    const execution = DELEGATION_CONTRACT.parseTransaction({
-      data: transaction.input,
-    });
-    if (!execution || execution.name !== "execute") return null;
-    const target = (execution.args[0] as string).toLowerCase();
-    const data = execution.args[1] as string;
-    if (target !== candidate.address.toLowerCase()) return null;
-
-    // The receiver observes the delegation contract as msg.sender. Use that
-    // stable identity for attribution; the top-level sender is its rotatable
-    // hot delegate and is tracked separately in the membership view.
-    return {
-      transaction: {
-        ...transaction,
-        from: transaction.to.toLowerCase(),
-        to: target,
-        input: data,
+// Transactions listed on the explorer address page of each receiver. This
+// only covers direct calls, so it complements the event-based discovery.
+async function explorerReportCandidates(
+  explorer: string,
+  contracts: Partial<Record<OracleModule, string>>,
+): Promise<ReportCandidate[]> {
+  const discovered = await Promise.all(
+    (Object.entries(contracts) as Array<[OracleModule, string]>).map(
+      async ([module, address]) => {
+        try {
+          const hashes = await explorerHashes(explorer, address);
+          return hashes.map((hash) => ({ hash, module, address }));
+        } catch {
+          return [];
+        }
       },
-      module: candidate.module,
-    };
-  } catch {
-    return null;
+    ),
+  );
+  return discovered.flat();
+}
+
+async function discoverReportCandidates(config: (typeof CONFIG)[NetworkKey]) {
+  const [fromEvents, fromExplorer] = await Promise.allSettled([
+    rpcReportCandidates(config.rpcs, config.contracts),
+    explorerReportCandidates(config.explorer, config.contracts),
+  ]);
+  const candidates = [fromEvents, fromExplorer].flatMap((result) =>
+    result.status === "fulfilled" ? result.value : [],
+  );
+  if (!candidates.length) {
+    const failure = [fromEvents, fromExplorer].find(
+      (result) => result.status === "rejected",
+    );
+    throw failure?.status === "rejected" && failure.reason instanceof Error
+      ? failure.reason
+      : new Error("No recent contract transactions were available");
   }
+  return candidates;
 }
 
 async function resolveVeboOperatorNames(
@@ -380,28 +428,10 @@ export async function GET(request: NextRequest) {
 
   const config = CONFIG[network];
   try {
-    const discovered = await Promise.all(
-      (Object.entries(config.contracts) as Array<[OracleModule, string]>).map(
-        async ([module, address]) => {
-          try {
-            const hashes = await explorerHashes(config.explorer, address);
-            return hashes.map((hash) => ({ hash, module, address }));
-          } catch {
-            return [];
-          }
-        },
-      ),
-    );
-    let candidates = discovered.flat();
-    if (!candidates.length) {
-      candidates = await rpcReportCandidates(config.rpcs, config.contracts);
-    }
-    if (!candidates.length) {
-      throw new Error("No recent contract transactions were available");
-    }
+    const candidates = await discoverReportCandidates(config);
 
     const uniqueHashes = [...new Set(candidates.map(({ hash }) => hash))];
-    const transactions = await rpcBatch<RpcTransaction>(
+    const transactions = await rpcBatch<RawTransaction>(
       config.rpcs,
       "eth_getTransactionByHash",
       uniqueHashes.map((hash) => [hash]),

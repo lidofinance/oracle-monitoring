@@ -29,11 +29,18 @@ import {
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import {
+  ORACLE_MODULES,
+  availableModules,
+  isOracleModule,
+  moduleFromMessage,
+  type OracleModule,
+} from "./oracle-modules";
 import type { ParsedOracleReport } from "./oracle-reports";
 
 type NetworkKey = "mainnet" | "hoodi";
 type ViewKey = "overview" | "telemetry" | "oracle";
-type ModuleKey = "ao" | "vebo" | "csm" | "cm";
+type ModuleKey = OracleModule;
 
 type Member = {
   address: string;
@@ -74,22 +81,24 @@ type NetworkSnapshot = {
 type Snapshot = Record<NetworkKey, NetworkSnapshot>;
 
 type OracleReportsPayload = {
-  contracts: Record<ModuleKey, string>;
+  contracts: Partial<Record<ModuleKey, string>>;
   reports: ParsedOracleReport[];
 };
 
-const MODULES: Array<{
-  key: ModuleKey;
+// HashConsensus contracts per module. The Accounting Oracle consensus is
+// required because its chain config is used for slot timing; other modules
+// are tracked only on the networks where they are deployed.
+type NetworkConfig = {
   label: string;
-  full: string;
-}> = [
-  { key: "ao", label: "AO", full: "Accounting Oracle" },
-  { key: "vebo", label: "VEBO", full: "Validator Exit Bus Oracle" },
-  { key: "csm", label: "CSM", full: "Community Staking Module" },
-  { key: "cm", label: "CM", full: "Curated Module" },
-];
+  chainLabel: string;
+  rpc: readonly string[];
+  explorer: string;
+  consensus: Partial<Record<ModuleKey, string>> & { ao: string };
+};
 
-const NETWORKS = {
+const MODULES = ORACLE_MODULES;
+
+const NETWORKS: Record<NetworkKey, NetworkConfig> = {
   mainnet: {
     label: "Mainnet",
     chainLabel: "Ethereum",
@@ -115,10 +124,11 @@ const NETWORKS = {
       ao: "0x32EC59a78abaca3f91527aeB2008925D5AaC1eFC",
       vebo: "0x30308CD8844fb2DB3ec4D056F1d475a802DCA07c",
       csm: "0x54f74a10e4397dDeF85C4854d9dfcA129D72C637",
+      csm_0x02: "0x41142D077860906B0A7Debb270f1B8e7d1c8BF34",
       cm: "0x920883908A78c1554f682006a8aB32E62Be09F33",
     },
   },
-} as const;
+};
 
 const DATABUS = "0x37De961D6bb5865867aDd416be07189D2Dd960e6";
 const DATABUS_EXPLORER = "https://hoodi.etherscan.io";
@@ -140,7 +150,22 @@ const DELEGATION_ABI = [
   "function owner() view returns (address)",
 ];
 
+// Operator names by oracle member address. Both the pre-EDF member EOAs and
+// the EDF DelegationContracts (LIP-37) are listed for Mainnet and Hoodi, so
+// the console keeps working across the switch.
 const LABELS: Record<string, string> = {
+  // Mainnet EDF DelegationContracts (added by vote #205)
+  "0xe75a431a98487dc69a14bdd13d858e3238e9c1b3": "Instadapp",
+  "0xc77d0bf3aa4778e36a89cdc8bbc9c34d8060637d": "Caliber",
+  "0xc7442d4d8f3ffea0fa4a18ad3062c8137ce21749": "Staking Facilities",
+  "0x56b3ea8016da18c6e8cd8135492d242f0de0dbbc":
+    "Chorus One (Bitwise)",
+  "0x4e3f2deeb59eb9a205d82d17647b3e56422e0fee": "P2P",
+  "0xd524101c3c40f71fce7b9312d299603880a06bdb": "Chainlayer",
+  "0x99cd2ef33040879d40bbc77df81863d97f13c64d": "bloXroute",
+  "0xc4f2704273598d51a0ec76a31c12553ec8f5a891": "MatrixedLink",
+  "0x5e8ed9f10307ed6fa793a347e4d0f407d00b9c6f": "Stakefish",
+  // Mainnet pre-EDF member EOAs
   "0x8db977c13caa938bc58464bfd622df0570564b78":
     "Chorus One (Bitwise)",
   "0x404335bce530400a5814375e7ec1fb55faff3ea2": "Staking Facilities",
@@ -151,6 +176,7 @@ const LABELS: Record<string, string> = {
   "0xc79f702202e3a6b0b6310b537e786b9acaa19baf": "Chainlayer",
   "0xe57b3792adcc5da47ef4ff588883f0ee0c9835c9": "MatrixedLink",
   "0x4118dad7f348a4063bd15786c299de2f3b1333f3": "Caliber",
+  // Hoodi pre-EDF member EOAs
   "0x219743f1911d84b32599bdc2df21fc8dba6f81a2": "Staking Facilities",
   "0xd3b1e36a372ca250eeff61f90e833ca070559970": "Stakefish",
   "0x99b2b75f490ffc9a29e4e1f5987be8e30e690adf": "P2P",
@@ -162,6 +188,7 @@ const LABELS: Record<string, string> = {
     "Chorus One (Bitwise)",
   "0x948a62cc0414979dc7aa9364ba5b96ecb29f8736": "Caliber",
   "0xca80ee7313a315879f326105134f938676cfd7a9": "Lido",
+  // Hoodi EDF DelegationContracts
   "0x929de74c921f3e719ad2bb026edef747d443dc8e": "Instadapp",
   "0x9f81976e461b82cfe3caec06de8efa8ad5543408": "Caliber",
   "0x9950477b8d8154ef44745612832464c3c2155f79":
@@ -173,17 +200,6 @@ const LABELS: Record<string, string> = {
   "0x443e31892ffd51f6f0fef6dae4ac2e2795f311bf": "bloXroute",
   "0x89e9fcb24cc82e9a449a69f3932c70ca2fa07e1d": "MatrixedLink",
   "0xafca4694c06720ad03037db3760a920320037217": "Lido",
-};
-
-const TOPIC_MODULES: Record<string, ModuleKey> = {
-  "0xc175062d338aeb0f6c17720126be534a0113654b826c93e62a34bd23cbe58b36":
-    "cm",
-  "0x84728a84725a206f8ec5a2ab533d0890029ade3fca0563b61dca1be60d73f40c":
-    "csm",
-  "0x2b819b2aa7a0f65647aa591f4b0db6b42b9cbd798674363c2217719c8ddc0126":
-    "vebo",
-  "0x0131b777a538d2509d6ec1bca91f61ac7a25b128baf35266feedf5a53eb4842a":
-    "ao",
 };
 
 function shorten(value: string, head = 6, tail = 4) {
@@ -229,9 +245,11 @@ function safeNetwork(value: string | null): NetworkKey {
 }
 
 function safeModule(value: string | null): ModuleKey | "all" {
-  return value === "ao" || value === "vebo" || value === "csm" || value === "cm"
-    ? value
-    : "all";
+  return isOracleModule(value) ? value : "all";
+}
+
+function moduleLabel(key: ModuleKey) {
+  return MODULES.find((module) => module.key === key)?.label ?? key;
 }
 
 function safeJson(text: string) {
@@ -272,34 +290,6 @@ function decodeBytes(data: string) {
   }
 }
 
-function moduleFromMessage(raw: string, topic: string): ModuleKey | "unknown" {
-  try {
-    const parsed = JSON.parse(raw);
-    const value = String(
-      parsed.module ??
-        parsed.module_name ??
-        parsed.daemon ??
-        parsed.component ??
-        parsed.type ??
-        "",
-    ).toLowerCase();
-    if (value.includes("account")) return "ao";
-    if (value.includes("eject") || value.includes("exit")) return "vebo";
-    if (value === "cm" || value.includes("cmv2") || value.includes("curated"))
-      return "cm";
-    if (value.includes("csm") || value.includes("community")) return "csm";
-  } catch {
-    const match = raw
-      .toLowerCase()
-      .match(/\b(accounting|ejector|exit|csm|cmv2|curated)\b/);
-    if (match?.[1] === "accounting") return "ao";
-    if (match?.[1] === "ejector" || match?.[1] === "exit") return "vebo";
-    if (match?.[1] === "csm") return "csm";
-    if (match) return "cm";
-  }
-  return TOPIC_MODULES[topic.toLowerCase()] ?? "unknown";
-}
-
 async function connect(rpcs: readonly string[]) {
   let lastError: unknown;
   for (const rpc of rpcs) {
@@ -316,11 +306,15 @@ async function connect(rpcs: readonly string[]) {
 
 async function fetchMembers(
   provider: JsonRpcProvider,
-  contracts: Record<ModuleKey, string>,
+  contracts: NetworkConfig["consensus"],
 ) {
   const moduleResults = await Promise.all(
-    MODULES.map(async ({ key }) => {
-      const contract = new Contract(contracts[key], MEMBER_ABI, provider);
+    availableModules(contracts).map(async ({ key }) => {
+      const contract = new Contract(
+        contracts[key] as string,
+        MEMBER_ABI,
+        provider,
+      );
       const [addresses, slots] = await contract.getMembers();
       return {
         key,
@@ -976,19 +970,23 @@ export default function OracleMonitor() {
     return map;
   }, [data]);
 
+  const networkModules = useMemo(
+    () => availableModules(NETWORKS[network].consensus),
+    [network],
+  );
   const staleCount = useMemo(() => {
     if (!data) return 0;
     return data.members.reduce((total, member) => {
       const modules = memberMessages.get(member.address);
       return (
         total +
-        MODULES.filter(({ key }) => {
+        networkModules.filter(({ key }) => {
           const message = modules?.get(key);
           return !message || message.ageSeconds > STALE_SECONDS;
         }).length
       );
     }, 0);
-  }, [data, memberMessages]);
+  }, [data, memberMessages, networkModules]);
   const trackedBalances =
     data?.members.flatMap((member) =>
       network === "mainnet"
@@ -1046,6 +1044,10 @@ export default function OracleMonitor() {
     selectedOracleReport ?? filteredOracleReports[0] ?? null;
 
   const explorer = NETWORKS[network].explorer;
+  const moduleFilterKeys: Array<ModuleKey | "all"> = [
+    "all",
+    ...networkModules.map(({ key }) => key),
+  ];
 
   return (
     <main className="app-shell">
@@ -1226,7 +1228,7 @@ export default function OracleMonitor() {
                   <thead>
                     <tr>
                       <th>Oracle member</th>
-                      {MODULES.map((module) => (
+                      {networkModules.map((module) => (
                         <th
                           className="module-column"
                           key={module.key}
@@ -1277,7 +1279,7 @@ export default function OracleMonitor() {
                               </div>
                             </div>
                           </td>
-                          {MODULES.map(({ key }) => {
+                          {networkModules.map(({ key }) => {
                             const message = memberMessages
                               .get(member.address)
                               ?.get(key);
@@ -1369,7 +1371,7 @@ export default function OracleMonitor() {
 
             <div className="report-controls">
               <div className="module-filter" aria-label="Filter by module">
-                {(["all", "ao", "vebo", "csm", "cm"] as const).map((key) => (
+                {moduleFilterKeys.map((key) => (
                   <button
                     type="button"
                     key={key}
@@ -1379,7 +1381,7 @@ export default function OracleMonitor() {
                       navigate("telemetry", network, key);
                     }}
                   >
-                    {key === "all" ? "All modules" : key.toUpperCase()}
+                    {key === "all" ? "All modules" : moduleLabel(key)}
                   </button>
                 ))}
               </div>
@@ -1552,7 +1554,7 @@ export default function OracleMonitor() {
 
             {oraclePayload && (
               <div className="receiver-strip" aria-label="Oracle receivers">
-                {MODULES.map(({ key, full }) => (
+                {availableModules(oraclePayload.contracts).map(({ key, full }) => (
                   <a
                     key={key}
                     href={`${explorer}/address/${oraclePayload.contracts[key]}`}
@@ -1562,7 +1564,9 @@ export default function OracleMonitor() {
                     <ModulePill module={key} />
                     <span>
                       <strong>{full}</strong>
-                      <small>{shorten(oraclePayload.contracts[key], 7, 5)}</small>
+                      <small>
+                        {shorten(oraclePayload.contracts[key] as string, 7, 5)}
+                      </small>
                     </span>
                     <ExternalLink size={12} />
                   </a>
@@ -1572,7 +1576,7 @@ export default function OracleMonitor() {
 
             <div className="report-controls">
               <div className="module-filter" aria-label="Filter oracle reports">
-                {(["all", "ao", "vebo", "csm", "cm"] as const).map((key) => (
+                {moduleFilterKeys.map((key) => (
                   <button
                     type="button"
                     key={key}
@@ -1582,7 +1586,7 @@ export default function OracleMonitor() {
                       navigate("oracle", network, key);
                     }}
                   >
-                    {key === "all" ? "All modules" : key.toUpperCase()}
+                    {key === "all" ? "All modules" : moduleLabel(key)}
                   </button>
                 ))}
               </div>

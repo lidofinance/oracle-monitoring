@@ -634,6 +634,11 @@ p {
   color: #a55218;
 }
 
+.module-csm_0x02 {
+  background: #e8f3ea;
+  color: #1f7a3d;
+}
+
 .module-unknown {
   background: #edf0ed;
   color: var(--muted);
@@ -746,7 +751,8 @@ p {
 .receiver-strip {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* One card per tracked module; the module count differs per network. */
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   margin-bottom: 12px;
 }
 

@@ -1,6 +1,8 @@
 import { formatUnits, Interface } from "ethers";
 
-export type OracleModule = "ao" | "vebo" | "csm" | "cm";
+import type { OracleModule } from "./oracle-modules";
+
+export type { OracleModule };
 
 export type ReportField = {
   label: string;
@@ -34,13 +36,30 @@ export type ParsedOracleReport = {
   rawJson: string;
 };
 
-type RpcTransaction = {
+export type RpcTransaction = {
   hash: string;
   from: string;
   to: string;
   input: string;
   blockNumber: string;
 };
+
+// A transaction as returned by eth_getTransactionByHash: contract creations
+// have no recipient.
+export type RawTransaction = Omit<RpcTransaction, "to"> & { to: string | null };
+
+export type ReportCandidate = {
+  hash: string;
+  module: OracleModule;
+  address: string;
+};
+
+// Execution Delegation Framework (LIP-37) DelegationContract entrypoint. Under
+// EDF the oracle member is the DelegationContract and the operator's hot key
+// calls the receiver through it.
+const DELEGATION_CONTRACT = new Interface([
+  "function execute(address target,bytes data) payable returns (bytes result)",
+]);
 
 const ACCOUNTING_V4 = new Interface([
   "function submitReportData((uint256 consensusVersion,uint256 refSlot,uint256 numValidators,uint256 clBalanceGwei,uint256[] stakingModuleIdsWithNewlyExitedValidators,uint256[] numExitedValidatorsByStakingModule,uint256 withdrawalVaultBalance,uint256 elRewardsVaultBalance,uint256 sharesRequestedToBurn,uint256[] withdrawalFinalizationBatches,uint256 simulatedShareRate,bool isBunkerMode,bytes32 vaultsDataTreeRoot,string vaultsDataTreeCid,uint256 extraDataFormat,bytes32 extraDataHash,uint256 extraDataItemsCount) data,uint256 contractVersion)",
@@ -377,7 +396,7 @@ function parseVebo(
 }
 
 function parseFee(
-  module: "csm" | "cm",
+  module: Exclude<OracleModule, "ao" | "vebo">,
   tx: RpcTransaction,
   timestamp: number,
 ): ParsedOracleReport | null {
@@ -464,6 +483,47 @@ export function parseOracleReport(
     if (module === "ao") return parseAccounting(transaction, timestamp);
     if (module === "vebo") return parseVebo(transaction, timestamp);
     return parseFee(module, transaction, timestamp);
+  } catch {
+    return null;
+  }
+}
+
+// Resolve the submitReportData call behind a report transaction. The call is
+// either sent to the receiver directly (pre-EDF members) or wrapped into a
+// DelegationContract execute(target, data) call (EDF members).
+export function unwrapReportTransaction(
+  transaction: RawTransaction,
+  candidate: ReportCandidate,
+): { transaction: RpcTransaction; module: OracleModule } | null {
+  if (!transaction.to) return null;
+  if (transaction.to.toLowerCase() === candidate.address.toLowerCase()) {
+    return {
+      transaction: { ...transaction, to: transaction.to },
+      module: candidate.module,
+    };
+  }
+
+  try {
+    const execution = DELEGATION_CONTRACT.parseTransaction({
+      data: transaction.input,
+    });
+    if (!execution || execution.name !== "execute") return null;
+    const target = (execution.args[0] as string).toLowerCase();
+    const data = execution.args[1] as string;
+    if (target !== candidate.address.toLowerCase()) return null;
+
+    // The receiver observes the delegation contract as msg.sender. Use that
+    // stable identity for attribution; the top-level sender is its rotatable
+    // hot delegate and is tracked separately in the membership view.
+    return {
+      transaction: {
+        ...transaction,
+        from: transaction.to.toLowerCase(),
+        to: target,
+        input: data,
+      },
+      module: candidate.module,
+    };
   } catch {
     return null;
   }

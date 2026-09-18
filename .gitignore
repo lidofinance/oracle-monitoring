@@ -36,6 +36,14 @@ yarn-error.log*
 
 # typescript
 next-env.d.ts
+*.tsbuildinfo
+
+# eslint
+.eslintcache
+
+# editors
+.idea/
+.vscode/
 /dist/
 /.wrangler/
 /outputs/
