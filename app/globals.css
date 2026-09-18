@@ -285,7 +285,7 @@ input:focus-visible {
   border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
-  grid-template-columns: minmax(360px, 1.7fr) repeat(3, minmax(140px, 0.55fr));
+  grid-template-columns: minmax(260px, 1.4fr) repeat(5, minmax(120px, 0.5fr));
   margin-bottom: 18px;
   min-height: 156px;
   overflow: hidden;
@@ -414,6 +414,10 @@ p {
   background: var(--green);
 }
 
+.legend-partial {
+  background: #d98a2b;
+}
+
 .legend-overdue {
   background: var(--red);
 }
@@ -424,7 +428,7 @@ p {
 
 .participation-table {
   border-collapse: collapse;
-  min-width: 980px;
+  min-width: 900px;
   table-layout: fixed;
   width: 100%;
 }
@@ -448,36 +452,11 @@ p {
 .participation-table th:first-child,
 .participation-table td:first-child {
   padding-left: 20px;
-  width: 26%;
+  width: 370px;
 }
 
 .participation-table .module-column {
-  width: 14%;
-}
-
-.participation-table .balance-column {
-  width: 18%;
-}
-
-.participation-table.with-dual-balances {
-  min-width: 1120px;
-}
-
-.participation-table.with-dual-balances th:first-child,
-.participation-table.with-dual-balances td:first-child {
-  width: 22%;
-}
-
-.participation-table.with-dual-balances .module-column {
-  width: 12%;
-}
-
-.participation-table.with-dual-balances .balance-column {
-  width: 15%;
-}
-
-.participation-table tr:last-child td {
-  border-bottom: 0;
+  width: auto;
 }
 
 .member-cell {
@@ -523,16 +502,114 @@ p {
   gap: 6px;
 }
 
+/* Participation matrix as a grid: every card in a row shares the row height */
+.matrix {
+  --matrix-member-width: 360px;
+  --matrix-gap: 10px;
+  --matrix-card-padding: 12px;
+  --matrix-side: 20px;
+  column-gap: var(--matrix-gap);
+  display: grid;
+  grid-template-columns: var(--matrix-member-width) repeat(
+      var(--matrix-modules),
+      minmax(150px, 1fr)
+    );
+  min-width: 900px;
+  padding: 0 var(--matrix-side);
+  width: 100%;
+}
+
+.matrix-head,
+.matrix-row {
+  column-gap: var(--matrix-gap);
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+}
+
+/* Header labels start where the card text starts. */
+.matrix-head {
+  border-bottom: 1px solid #e8ece8;
+  margin: 0 calc(-1 * var(--matrix-side));
+  padding: 0 var(--matrix-side);
+  background: #f8f9f7;
+}
+
+.matrix-head > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 11px var(--matrix-card-padding);
+  text-transform: uppercase;
+}
+
+.matrix-row {
+  border-bottom: 1px solid #e8ece8;
+  margin: 0 calc(-1 * var(--matrix-side));
+  padding: var(--matrix-gap) var(--matrix-side);
+}
+
+.matrix-row:last-child {
+  border-bottom: 0;
+}
+
+.matrix-row:hover {
+  background: #fbfcfb;
+}
+
+.matrix-row > [role="cell"] {
+  display: flex;
+  min-width: 0;
+}
+
+/* Member card and module tiles share the same box model. */
+.member-card,
 .slot-cell {
-  align-items: flex-start;
-  border: 1px solid transparent;
-  border-radius: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  padding: var(--matrix-card-padding);
+  width: 100%;
+}
+
+.member-card {
+  background: var(--surface);
+  gap: 8px;
+}
+
+.member-card .member-details {
+  flex: 1;
+  gap: 8px;
+}
+
+.member-card .member-details > strong {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.member-card .wallet-chips {
+  margin-top: auto;
+}
+
+/* Module tiles fill the cell so they line up under the column headers */
+.slot-cell {
+  align-items: flex-start;
   gap: 4px;
   min-width: 0;
-  padding: 7px 8px;
-  width: 100%;
+}
+
+.slot-cell .slot-ok {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.slot-cell .slot-ok {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
 }
 
 .slot-cell.recent {
@@ -544,9 +621,32 @@ p {
   color: var(--green);
 }
 
+.slot-cell.partial {
+  background: #fff6ea;
+  border-color: #f0d3a6;
+}
+
+.slot-cell.partial .slot-ok {
+  color: #a55218;
+}
+
 .slot-cell.overdue {
   background: var(--red-soft);
   border-color: #f2bbb5;
+}
+
+.slot-telemetry {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.slot-telemetry.silent {
+  color: #a55218;
+}
+
+.slot-cell.overdue .slot-telemetry.silent {
+  color: var(--red);
 }
 
 .slot-cell.overdue .slot-ok,
@@ -1454,5 +1554,269 @@ p {
 
   .modal-backdrop {
     padding: 8px;
+  }
+}
+
+/* Contract details inside the participation matrix */
+.member-cell strong {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* Pinned to the bottom, level with the wallet chips of the member card. */
+.slot-versions {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  color: var(--muted);
+  display: block;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10px;
+  line-height: 22px;
+  margin-top: auto;
+  padding-top: 4px;
+  width: 100%;
+}
+
+
+
+.member-details {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.member-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+}
+
+.member-facts > div {
+  align-items: center;
+  display: flex;
+  font-size: 11px;
+  gap: 8px;
+  line-height: 18px;
+  min-width: 0;
+}
+
+.member-facts dt {
+  color: var(--muted);
+  flex: 0 0 64px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.member-facts dd {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 0;
+  min-width: 0;
+}
+
+.member-facts .address-link {
+  font-size: 11px;
+}
+
+.wallet-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.wallet-chip {
+  align-items: baseline;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+  height: 22px;
+  line-height: 16px;
+  padding: 2px 8px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.wallet-chip span {
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.wallet-chip strong {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-weight: 600;
+}
+
+.wallet-chip.funded {
+  background: var(--green-soft);
+  border-color: #b8dfcf;
+  color: var(--green);
+}
+
+.wallet-chip.low {
+  background: var(--red-soft);
+  border-color: #f2bbb5;
+  color: var(--red);
+}
+
+.holder-seat {
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  white-space: nowrap;
+}
+
+.holder-seat.contract {
+  background: #e8f3ea;
+  color: #1f7a3d;
+}
+
+.holder-seat.delegate {
+  background: #eaf2f7;
+  color: var(--blue);
+}
+
+.holder-seat.legacy {
+  background: #fff0e3;
+  color: #a55218;
+}
+
+.holder-seat.terminated {
+  background: #fdecec;
+  color: #b42318;
+}
+
+.address-link {
+  align-items: center;
+  display: inline-flex;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 12px;
+  gap: 4px;
+}
+
+.status-bad {
+  color: #b42318;
+}
+
+.status-ok {
+  color: #1f7a3d;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* RPC picker (lives in the dark context bar) */
+.rpc-picker {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  color: #dce6e0;
+  display: inline-flex;
+  gap: 8px;
+  height: 30px;
+  padding: 0 6px 0 10px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.rpc-picker:hover,
+.rpc-picker:focus-within {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.rpc-picker.failed {
+  border-color: rgba(217, 122, 43, 0.7);
+  color: #f0b27a;
+}
+
+.rpc-picker .pulse.idle {
+  background: #7f8d86;
+  box-shadow: none;
+}
+
+.rpc-label {
+  color: #9fada5;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.rpc-picker select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%239fada5' stroke-width='1.5' stroke-linecap='round'/></svg>")
+    no-repeat right 4px center;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  max-width: 260px;
+  outline: none;
+  padding: 0 20px 0 0;
+  text-overflow: ellipsis;
+}
+
+.rpc-picker select option {
+  color: var(--ink);
+}
+
+.rpc-custom {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+}
+
+.rpc-custom input {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  color: #f2f6f3;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+  height: 24px;
+  outline: none;
+  padding: 0 8px;
+  width: 260px;
+}
+
+.rpc-custom input::placeholder {
+  color: #7f8d86;
+}
+
+.rpc-custom button {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  color: #dce6e0;
+  cursor: pointer;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  width: 24px;
+}
+
+.rpc-custom button:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+@media (max-width: 900px) {
+  .rpc-custom input {
+    width: 160px;
   }
 }

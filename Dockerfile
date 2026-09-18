@@ -13,6 +13,10 @@ COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
 COPY . .
+
+# Browser RPC lists are inlined into the client bundle at build time.
+ARG NEXT_PUBLIC_MAINNET_RPC_URLS=
+ARG NEXT_PUBLIC_HOODI_RPC_URLS=
 RUN npm run build
 
 FROM base AS production

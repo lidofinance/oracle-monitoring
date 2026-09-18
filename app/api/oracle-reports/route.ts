@@ -9,6 +9,7 @@ import {
   parseOracleReport,
   unwrapReportTransaction,
 } from "../../oracle-reports";
+import { HOODI_CHAIN_ID, MAINNET_CHAIN_ID, serverRpcs } from "../../rpc-config";
 
 type NetworkKey = "mainnet" | "hoodi";
 
@@ -19,29 +20,19 @@ type RpcResponse<T> = {
 };
 
 // Report receivers (the oracle contracts that accept submitReportData) per
-// network. A module missing on a network is simply not tracked there.
+// network. A module missing on a network is simply not tracked there. RPC
+// endpoints come from app/rpc-config.ts.
 const CONFIG: Record<
   NetworkKey,
   {
-    explorer: string;
+    chainId: number;
     stakingRouter: string;
-    rpcs: readonly string[];
     contracts: Partial<Record<OracleModule, string>>;
   }
 > = {
   mainnet: {
-    explorer: "https://etherscan.io",
+    chainId: MAINNET_CHAIN_ID,
     stakingRouter: "0xFdDf38947aFB03C621C71b06C9C70bce73f12999",
-    // Endpoints must serve eth_getLogs over 10k-block ranges for the whole
-    // lookback window in small batches. publicnode rejects ranges older than
-    // a few thousand blocks and flashbots keeps only recent logs, so they are
-    // fallbacks for the other calls.
-    rpcs: [
-      "https://rpc.mevblocker.io",
-      "https://gateway.tenderly.co/public/mainnet",
-      "https://rpc.flashbots.net",
-      "https://ethereum-rpc.publicnode.com",
-    ],
     contracts: {
       ao: "0x852deD011285fe67063a08005c71a85690503Cee",
       vebo: "0x0De4Ea0184c2ad0BacA7183356Aea5B8d5Bf5c6e",
@@ -50,12 +41,8 @@ const CONFIG: Record<
     },
   },
   hoodi: {
-    explorer: "https://hoodi.etherscan.io",
+    chainId: HOODI_CHAIN_ID,
     stakingRouter: "0xCc820558B39ee15C7C45B59390B503b83fb499A8",
-    rpcs: [
-      "https://rpc.hoodi.ethpandaops.io",
-      "https://ethereum-hoodi-rpc.publicnode.com",
-    ],
     contracts: {
       ao: "0xcb883B1bD0a41512b42D2dB267F2A2cd919FB216",
       vebo: "0x8664d394C2B3278F26A1B44B967aEf99707eeAB2",
@@ -81,20 +68,53 @@ const CURATED_MODULE = new Interface([
 const META_REGISTRY = new Interface([
   "function getOperatorMetadata(uint256) view returns ((string name,string description,bool ownerEditsRestricted))",
 ]);
-async function explorerHashes(explorer: string, address: string) {
-  const response = await fetch(`${explorer}/address/${address}`, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (compatible; LidoOracleWatch/1.0; +https://lido.fi)",
-    },
+const ETHERSCAN_API = "https://api.etherscan.io/v2/api";
+const ETHERSCAN_PAGE_SIZE = 40;
+
+// Latest transactions of one address from the Etherscan API (v2). "txlist"
+// lists direct calls, "txlistinternal" lists internal calls, which is how
+// reports sent through EDF DelegationContracts reach the receiver.
+async function etherscanHashes(
+  chainId: number,
+  address: string,
+  action: "txlist" | "txlistinternal",
+  apiKey: string,
+) {
+  const params = new URLSearchParams({
+    chainid: String(chainId),
+    module: "account",
+    action,
+    address,
+    sort: "desc",
+    page: "1",
+    offset: String(ETHERSCAN_PAGE_SIZE),
+    apikey: apiKey,
+  });
+  const response = await fetch(`${ETHERSCAN_API}?${params.toString()}`, {
     next: { revalidate: 300 },
   });
-  if (!response.ok) throw new Error(`Explorer returned ${response.status}`);
-  const html = await response.text();
-  const hashes = [
-    ...html.matchAll(/href=["']\/tx\/(0x[a-fA-F0-9]{64})/g),
-  ].map((match) => match[1].toLowerCase());
-  return [...new Set(hashes)].slice(0, 40);
+  if (!response.ok) throw new Error(`Etherscan returned ${response.status}`);
+  const payload = (await response.json()) as {
+    status?: string;
+    message?: string;
+    result?: Array<{ hash?: string }> | string;
+  };
+  if (!Array.isArray(payload.result)) {
+    // "No transactions found" is reported as an error status with a message.
+    if (payload.message?.startsWith("No transactions")) return [];
+    throw new Error(
+      typeof payload.result === "string"
+        ? payload.result
+        : (payload.message ?? "Etherscan request failed"),
+    );
+  }
+  return [
+    ...new Set(
+      payload.result.flatMap((item) =>
+        item.hash ? [item.hash.toLowerCase()] : [],
+      ),
+    ),
+  ];
 }
 
 // Public endpoints cap the number of calls per JSON-RPC batch; log queries
@@ -167,7 +187,7 @@ async function rpcBatchOnce<T>(
 }
 
 // Discover report transactions through the ProcessingStarted event the
-// receiver emits on submitReportData. Unlike the explorer address page this
+// receiver emits on submitReportData. Unlike an address transaction list this
 // also finds calls that arrive through EDF DelegationContracts, where the
 // receiver is not the transaction recipient.
 async function rpcReportCandidates(
@@ -221,39 +241,47 @@ async function rpcReportCandidates(
   );
 }
 
-// Transactions listed on the explorer address page of each receiver. This
-// only covers direct calls, so it complements the event-based discovery.
-async function explorerReportCandidates(
-  explorer: string,
+// Transactions of each receiver listed by Etherscan. Used only when an API
+// key is configured; it complements the event-based discovery with history
+// older than the log lookback window.
+async function etherscanReportCandidates(
+  chainId: number,
   contracts: Partial<Record<OracleModule, string>>,
+  apiKey: string,
 ): Promise<ReportCandidate[]> {
   const discovered = await Promise.all(
-    (Object.entries(contracts) as Array<[OracleModule, string]>).map(
-      async ([module, address]) => {
-        try {
-          const hashes = await explorerHashes(explorer, address);
-          return hashes.map((hash) => ({ hash, module, address }));
-        } catch {
-          return [];
-        }
-      },
+    (Object.entries(contracts) as Array<[OracleModule, string]>).flatMap(
+      ([module, address]) =>
+        (["txlist", "txlistinternal"] as const).map(async (action) => {
+          try {
+            const hashes = await etherscanHashes(chainId, address, action, apiKey);
+            return hashes.map((hash) => ({ hash, module, address }));
+          } catch {
+            return [];
+          }
+        }),
     ),
   );
   return discovered.flat();
 }
 
-async function discoverReportCandidates(config: (typeof CONFIG)[NetworkKey]) {
-  const [fromEvents, fromExplorer] = await Promise.allSettled([
-    rpcReportCandidates(config.rpcs, config.contracts),
-    explorerReportCandidates(config.explorer, config.contracts),
-  ]);
-  const candidates = [fromEvents, fromExplorer].flatMap((result) =>
+async function discoverReportCandidates(
+  config: (typeof CONFIG)[NetworkKey],
+  rpcs: readonly string[],
+) {
+  const apiKey = process.env.ETHERSCAN_API_KEY?.trim();
+  const sources = [
+    rpcReportCandidates(rpcs, config.contracts),
+    ...(apiKey
+      ? [etherscanReportCandidates(config.chainId, config.contracts, apiKey)]
+      : []),
+  ];
+  const results = await Promise.allSettled(sources);
+  const candidates = results.flatMap((result) =>
     result.status === "fulfilled" ? result.value : [],
   );
   if (!candidates.length) {
-    const failure = [fromEvents, fromExplorer].find(
-      (result) => result.status === "rejected",
-    );
+    const failure = results.find((result) => result.status === "rejected");
     throw failure?.status === "rejected" && failure.reason instanceof Error
       ? failure.reason
       : new Error("No recent contract transactions were available");
@@ -427,12 +455,13 @@ export async function GET(request: NextRequest) {
   }
 
   const config = CONFIG[network];
+  const rpcs = serverRpcs(network);
   try {
-    const candidates = await discoverReportCandidates(config);
+    const candidates = await discoverReportCandidates(config, rpcs);
 
     const uniqueHashes = [...new Set(candidates.map(({ hash }) => hash))];
     const transactions = await rpcBatch<RawTransaction>(
-      config.rpcs,
+      rpcs,
       "eth_getTransactionByHash",
       uniqueHashes.map((hash) => [hash]),
     );
@@ -454,7 +483,7 @@ export async function GET(request: NextRequest) {
       ),
     ];
     const blocks = await rpcBatch<{ timestamp: string }>(
-      config.rpcs,
+      rpcs,
       "eth_getBlockByNumber",
       blockNumbers.map((block) => [block, false]),
     );
@@ -476,7 +505,7 @@ export async function GET(request: NextRequest) {
       .filter((report) => report !== null)
       .sort((a, b) => b.blockNumber - a.blockNumber);
     await resolveVeboOperatorNames(
-      config.rpcs,
+      rpcs,
       config.stakingRouter,
       reports,
     );

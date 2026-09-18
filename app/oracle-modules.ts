@@ -27,18 +27,61 @@ export function availableModules<T>(
   return ORACLE_MODULES.filter(({ key }) => contracts[key] !== undefined);
 }
 
-// Legacy DataBus topic hashes, used only when a telemetry payload does not
-// name its module.
-const TOPIC_MODULES: Record<string, OracleModule> = {
-  "0xc175062d338aeb0f6c17720126be534a0113654b826c93e62a34bd23cbe58b36":
-    "cm",
-  "0x84728a84725a206f8ec5a2ab533d0890029ade3fca0563b61dca1be60d73f40c":
-    "csm",
+// DataBus event ids sent by lido-oracle (keccak256 of the event name).
+export type TelemetryEvent = "startup" | "report" | "diagnostic" | "unknown";
+
+// keccak256("OracleStartup")
+export const ORACLE_STARTUP_TOPIC =
+  "0x84728a84725a206f8ec5a2ab533d0890029ade3fca0563b61dca1be60d73f40c";
+
+const TELEMETRY_EVENTS: Record<string, TelemetryEvent> = {
+  [ORACLE_STARTUP_TOPIC]: "startup",
+  // keccak256("OracleReport")
   "0x2b819b2aa7a0f65647aa591f4b0db6b42b9cbd798674363c2217719c8ddc0126":
-    "vebo",
+    "report",
+  // keccak256("Diagnostic")
+  "0xc175062d338aeb0f6c17720126be534a0113654b826c93e62a34bd23cbe58b36":
+    "diagnostic",
+};
+
+export function telemetryEventFromTopic(topic: string): TelemetryEvent {
+  return TELEMETRY_EVENTS[topic.toLowerCase()] ?? "unknown";
+}
+
+// Legacy DataBus topic (keccak256("accounting")), used only when a telemetry
+// payload does not name its module.
+const TOPIC_MODULES: Record<string, OracleModule> = {
   "0x0131b777a538d2509d6ec1bca91f61ac7a25b128baf35266feedf5a53eb4842a":
     "ao",
 };
+
+export type TelemetrySetup = {
+  version?: string;
+  kapiVersion?: string;
+  delegationContract?: string;
+};
+
+// Setup details an oracle reports about itself: the oracle version is part of
+// every message, the Keys API version and the DelegationContract address are
+// sent in the startup message.
+export function parseTelemetrySetup(raw: string): TelemetrySetup {
+  try {
+    const parsed = JSON.parse(raw) as {
+      version?: unknown;
+      data?: { kapi_version?: unknown; delegation_contract_address?: unknown };
+    };
+    const text = (value: unknown) =>
+      typeof value === "string" && value.trim() ? value.trim() : undefined;
+    const delegationContract = text(parsed.data?.delegation_contract_address);
+    return {
+      version: text(parsed.version),
+      kapiVersion: text(parsed.data?.kapi_version),
+      delegationContract: delegationContract?.toLowerCase(),
+    };
+  } catch {
+    return {};
+  }
+}
 
 export function moduleFromMessage(
   raw: string,

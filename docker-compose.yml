@@ -3,16 +3,25 @@
 #   Open:            http://localhost:3000
 #   Logs:            docker compose logs -f oracle-watch
 #   Stop:            docker compose down
+#
+# Optional settings are read from a .env file next to this compose file, see
+# .env.example. Browser RPC lists are build arguments, the rest is runtime.
 
 services:
   oracle-watch:
     build:
       context: .
       target: production
+      args:
+        NEXT_PUBLIC_MAINNET_RPC_URLS: ${NEXT_PUBLIC_MAINNET_RPC_URLS:-}
+        NEXT_PUBLIC_HOODI_RPC_URLS: ${NEXT_PUBLIC_HOODI_RPC_URLS:-}
     image: lidofinance/oracle-monitoring:local
     container_name: lido-oracle-watch
     restart: unless-stopped
     environment:
       PORT: ${PORT:-3000}
+      MAINNET_RPC_URLS: ${MAINNET_RPC_URLS:-}
+      HOODI_RPC_URLS: ${HOODI_RPC_URLS:-}
+      ETHERSCAN_API_KEY: ${ETHERSCAN_API_KEY:-}
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
