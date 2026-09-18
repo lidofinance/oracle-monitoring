@@ -1,0 +1,31 @@
+# dependencies and build output
+node_modules
+dist
+.vinext
+.wrangler
+.next
+out
+coverage
+*.tsbuildinfo
+
+# git, editors, OS
+.git
+.gitignore
+.github
+.idea
+.vscode
+.DS_Store
+
+# local environment and logs
+.env*
+*.log
+
+# not needed in the image
+tests
+examples
+docs
+README.md
+LICENSE
+Dockerfile
+docker-compose.yml
+.dockerignore

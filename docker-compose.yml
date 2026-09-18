@@ -1,0 +1,18 @@
+# Usage:
+#   Build and run:   docker compose up -d --build
+#   Open:            http://localhost:3000
+#   Logs:            docker compose logs -f oracle-watch
+#   Stop:            docker compose down
+
+services:
+  oracle-watch:
+    build:
+      context: .
+      target: production
+    image: lidofinance/oracle-monitoring:local
+    container_name: lido-oracle-watch
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT:-3000}
+    ports:
+      - "${PORT:-3000}:${PORT:-3000}"
