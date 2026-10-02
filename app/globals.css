@@ -1109,6 +1109,16 @@ p {
   box-shadow: inset 3px 0 0 var(--green);
 }
 
+/* Reports of the same frame as the open one stand out, the rest steps back. */
+.ledger-rows > button.related {
+  background: #f6faf7;
+  box-shadow: inset 3px 0 0 #9fcdb9;
+}
+
+.ledger-rows > button.unrelated:not(:hover) > * {
+  opacity: 0.55;
+}
+
 .ledger-block,
 .ledger-sender {
   min-width: 0;
@@ -1213,6 +1223,72 @@ p {
 .oracle-inspector {
   max-height: 820px;
   overflow-y: auto;
+}
+
+.report-frame {
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  padding: 12px 16px;
+}
+
+.report-frame > header {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.frame-phase {
+  align-items: baseline;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 150px minmax(0, 1fr);
+}
+
+.frame-phase > span {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 10px;
+  gap: 8px;
+}
+
+.frame-phase > small {
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.frame-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.frame-item {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 10px;
+  padding: 3px 7px;
+}
+
+.frame-item:hover {
+  background: #f1f6f2;
+}
+
+.frame-item.differs {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.frame-item.active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #fff;
 }
 
 .decoded-fields {

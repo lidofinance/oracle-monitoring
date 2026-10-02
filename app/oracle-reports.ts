@@ -70,10 +70,36 @@ export type ParsedOracleReport = {
   timestamp: number;
   refSlot: number;
   contractVersion?: string;
+  // Hash votes only: whether the vote equals the hash that reached the
+  // quorum. Unset while there is no consensus for the slot.
+  consensusMatch?: boolean;
   fields: ReportField[];
   veboOperators?: VeboOperatorSummary[];
   rawJson: string;
 };
+
+// Reports of one frame share the module and the reference slot.
+export function frameKey(
+  report: Pick<ParsedOracleReport, "module" | "refSlot">,
+) {
+  return `${report.module}:${report.refSlot}`;
+}
+
+// The reports of the frame of `report`, by phase and in chain order.
+export function frameReports(
+  reports: readonly ParsedOracleReport[],
+  report: Pick<ParsedOracleReport, "module" | "refSlot">,
+): Record<ReportPhase, ParsedOracleReport[]> {
+  const key = frameKey(report);
+  const frame = reports
+    .filter((item) => frameKey(item) === key)
+    .sort((a, b) => a.blockNumber - b.blockNumber);
+  return {
+    hash: frame.filter((item) => item.phase === "hash"),
+    data: frame.filter((item) => item.phase === "data"),
+    extra: frame.filter((item) => item.phase === "extra"),
+  };
+}
 
 export type RpcTransaction = {
   hash: string;
@@ -690,6 +716,9 @@ export function parseHashVote(
   vote: HashVote,
   timestamp: number,
 ): ParsedOracleReport {
+  const consensusMatch = vote.consensus
+    ? vote.consensus.report.toLowerCase() === vote.report.toLowerCase()
+    : undefined;
   const fields: ReportField[] = [
     refSlotField(BigInt(vote.refSlot)),
     {
@@ -706,11 +735,12 @@ export function parseHashVote(
     },
     {
       label: "Vote",
-      value: !vote.consensus
-        ? "Consensus not reached"
-        : vote.consensus.report.toLowerCase() === vote.report.toLowerCase()
-          ? "Matches consensus"
-          : "Differs from consensus",
+      value:
+        consensusMatch === undefined
+          ? "Consensus not reached"
+          : consensusMatch
+            ? "Matches consensus"
+            : "Differs from consensus",
       description: "Whether this member voted for the hash that reached the quorum.",
     },
   ];
@@ -731,6 +761,7 @@ export function parseHashVote(
     receiver: vote.address,
     timestamp,
     refSlot: vote.refSlot,
+    consensusMatch,
     fields,
     rawJson: JSON.stringify(
       Object.fromEntries(fields.map((field) => [field.label, field.value])),

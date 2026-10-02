@@ -23,7 +23,8 @@ or database.
   (LIP-37) DelegationContracts. Multi-select filters by module, phase and
   holder show the number of reports behind every option; hash votes are
   loaded for the latest 10, 20 or 40 frames per module, within the 35-day
-  history window of the report API.
+  history window of the report API. The open report highlights the other
+  transactions of its frame and lists them by phase.
 
 Tracked modules: Accounting Oracle (AO), Validator Exit Bus Oracle (VEBO),
 CSM fee oracle (CSM), CSM 0x02 fee oracle (CSM 0x02, Hoodi only for now) and

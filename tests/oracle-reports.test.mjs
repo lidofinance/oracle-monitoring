@@ -5,6 +5,7 @@ import { Interface } from "ethers";
 import {
   collectReportLogs,
   decodeExtraDataList,
+  frameReports,
   parseExtraDataReport,
   parseHashVote,
   parseOracleReport,
@@ -228,15 +229,18 @@ test("hash votes are compared with the consensus hash", () => {
   assert.equal(matching.receiver, AO_CONSENSUS);
   assert.equal(matching.blockNumber, 16);
   assert.equal(value(matching, "Vote"), "Matches consensus");
+  assert.equal(matching.consensusMatch, true);
 
   const differing = parseHashVote(
     { ...vote, consensus: { report: HASH_B, support: 5 } },
     1_700_000_000,
   );
   assert.equal(value(differing, "Vote"), "Differs from consensus");
+  assert.equal(differing.consensusMatch, false);
 
   const pending = parseHashVote(vote, 1_700_000_000);
   assert.equal(value(pending, "Vote"), "Consensus not reached");
+  assert.equal(pending.consensusMatch, undefined);
   assert.equal(value(pending, "Consensus hash"), "Not reached");
 });
 
@@ -351,4 +355,35 @@ test("the hash vote depth accepts only the listed values", () => {
   assert.equal(safeHashVoteFrames("20"), 20);
   assert.equal(safeHashVoteFrames("15"), 10);
   assert.equal(safeHashVoteFrames(null), 10);
+});
+
+test("frame reports share the module and the reference slot", () => {
+  const report = (module, phase, refSlot, blockNumber) => ({
+    module,
+    phase,
+    refSlot,
+    blockNumber,
+  });
+  const reports = [
+    report("ao", "extra", 100, 14),
+    report("ao", "data", 100, 13),
+    report("ao", "hash", 100, 12),
+    report("ao", "hash", 100, 11),
+    // Another module and another slot are other frames.
+    report("vebo", "hash", 100, 10),
+    report("ao", "hash", 200, 20),
+  ];
+  const frame = frameReports(reports, { module: "ao", refSlot: 100 });
+  // Reports come in chain order inside a phase.
+  assert.deepEqual(
+    frame.hash.map((item) => item.blockNumber),
+    [11, 12],
+  );
+  assert.deepEqual(frame.data, [reports[1]]);
+  assert.deepEqual(frame.extra, [reports[0]]);
+  assert.deepEqual(frameReports(reports, { module: "csm", refSlot: 100 }), {
+    hash: [],
+    data: [],
+    extra: [],
+  });
 });

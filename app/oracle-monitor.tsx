@@ -55,6 +55,8 @@ import {
   DEFAULT_HASH_VOTE_FRAMES,
   HASH_VOTE_FRAMES,
   REPORT_PHASES,
+  frameKey,
+  frameReports,
   safeHashVoteFrames,
   type ParsedOracleReport,
   type ReportPhase,
@@ -1314,15 +1316,84 @@ function LoadingState() {
   );
 }
 
+// The transactions of one report phase inside the frame summary. A click
+// opens the transaction in the inspector.
+function FramePhase({
+  phase,
+  summary,
+  reports,
+  current,
+  empty,
+  onSelect,
+}: {
+  phase: ReportPhase;
+  summary?: string;
+  reports: ParsedOracleReport[];
+  current: ParsedOracleReport;
+  // Shown when the frame has no transaction of this phase.
+  empty: string;
+  onSelect: (report: ParsedOracleReport) => void;
+}) {
+  return (
+    <div className="frame-phase">
+      <span>
+        <PhasePill phase={phase} />
+        {summary}
+      </span>
+      {reports.length ? (
+        <div className="frame-items">
+          {reports.map((item) => (
+            <button
+              type="button"
+              key={reportKey(item)}
+              className={[
+                "frame-item",
+                reportKey(item) === reportKey(current) ? "active" : "",
+                item.consensusMatch === false ? "differs" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              title={[
+                `Block ${item.blockNumber.toLocaleString()}`,
+                formatTime(item.timestamp),
+                item.consensusMatch === false ? "Differs from consensus" : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+              aria-pressed={reportKey(item) === reportKey(current)}
+              onClick={() => onSelect(item)}
+            >
+              {LABELS[item.sender] ?? shorten(item.sender, 6, 4)}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <small>{empty}</small>
+      )}
+    </div>
+  );
+}
+
 function OracleReportInspector({
   report,
+  frame,
+  committeeSize,
+  hashVoteFrames,
   explorer,
   onCopied,
+  onSelect,
 }: {
   report: ParsedOracleReport;
+  // All loaded transactions of the report frame, by phase.
+  frame: Record<ReportPhase, ParsedOracleReport[]>;
+  // Members of the module committee, when known.
+  committeeSize?: number;
+  hashVoteFrames: number;
   explorer: string;
   onCopied: () => void;
+  onSelect: (report: ParsedOracleReport) => void;
 }) {
+  const voters = new Set(frame.hash.map((vote) => vote.sender)).size;
   return (
     <>
       <header className="inspector-header">
@@ -1377,6 +1448,42 @@ function OracleReportInspector({
           </a>
         </div>
       </div>
+
+      <section className="report-frame" aria-label="Frame transactions">
+        <header>
+          Frame · slot {report.refSlot.toLocaleString()}
+        </header>
+        <FramePhase
+          phase="hash"
+          summary={
+            frame.hash.length
+              ? `${voters}${committeeSize ? ` of ${committeeSize}` : ""} members`
+              : undefined
+          }
+          reports={frame.hash}
+          current={report}
+          empty={`Not loaded: hash votes cover the latest ${hashVoteFrames} frames`}
+          onSelect={onSelect}
+        />
+        <FramePhase
+          phase="data"
+          reports={frame.data}
+          current={report}
+          empty="No report data transaction found"
+          onSelect={onSelect}
+        />
+        <FramePhase
+          phase="extra"
+          reports={frame.extra}
+          current={report}
+          empty={
+            report.module === "ao"
+              ? "No extra data transaction found"
+              : "This module has no extra data phase"
+          }
+          onSelect={onSelect}
+        />
+      </section>
 
       <div className="decoded-fields">
         {report.fields.map((field) => (
@@ -1864,6 +1971,35 @@ export default function OracleMonitor() {
   const filteredOracleReports = oracleFilter.items;
   const visibleOracleReport =
     selectedOracleReport ?? filteredOracleReports[0] ?? null;
+  // The frame of the open report: its transactions are highlighted in the
+  // ledger and listed in the inspector, also the ones hidden by the filters.
+  const visibleFrameKey = visibleOracleReport
+    ? frameKey(visibleOracleReport)
+    : null;
+  const visibleFrame = useMemo(
+    () =>
+      visibleOracleReport
+        ? frameReports(oraclePayload?.reports ?? [], visibleOracleReport)
+        : null,
+    [oraclePayload, visibleOracleReport],
+  );
+  // A report opened from the frame summary can be outside the visible part
+  // of the ledger: scroll the ledger, not the page, to its row.
+  const oracleLedger = useRef<HTMLDivElement>(null);
+  const visibleOracleKey = visibleOracleReport
+    ? reportKey(visibleOracleReport)
+    : null;
+  useEffect(() => {
+    const ledger = oracleLedger.current;
+    const row = ledger?.querySelector("button.active");
+    if (!ledger || !row) return;
+    const view = ledger.getBoundingClientRect();
+    const bounds = row.getBoundingClientRect();
+    if (bounds.top < view.top) ledger.scrollTop -= view.top - bounds.top;
+    else if (bounds.bottom > view.bottom) {
+      ledger.scrollTop += bounds.bottom - view.bottom;
+    }
+  }, [visibleOracleKey]);
 
   const explorer = NETWORKS[network].explorer;
   const moduleOptions: FilterOption<ModuleKey>[] = networkModules.map(
@@ -2708,7 +2844,7 @@ export default function OracleMonitor() {
                     <span>Submitter</span>
                     <span>Age</span>
                   </header>
-                  <div className="ledger-rows">
+                  <div className="ledger-rows" ref={oracleLedger}>
                     {filteredOracleReports.length ? (
                       filteredOracleReports.map((report) => {
                         const ageSeconds = Math.max(
@@ -2724,7 +2860,9 @@ export default function OracleMonitor() {
                               visibleOracleReport &&
                               reportKey(visibleOracleReport) === reportKey(report)
                                 ? "active"
-                                : ""
+                                : frameKey(report) === visibleFrameKey
+                                  ? "related"
+                                  : "unrelated"
                             }
                             onClick={() => setSelectedOracleReport(report)}
                           >
@@ -2765,11 +2903,21 @@ export default function OracleMonitor() {
                 </section>
 
                 <aside className="report-inspector oracle-inspector">
-                  {visibleOracleReport ? (
+                  {visibleOracleReport && visibleFrame ? (
                     <OracleReportInspector
                       report={visibleOracleReport}
+                      frame={visibleFrame}
+                      committeeSize={
+                        data.members.filter(
+                          (member) =>
+                            member.lastSlots[visibleOracleReport.module] !==
+                            undefined,
+                        ).length || undefined
+                      }
+                      hashVoteFrames={hashVoteFrames}
                       explorer={explorer}
                       onCopied={copied}
+                      onSelect={setSelectedOracleReport}
                     />
                   ) : (
                     <div className="inspector-empty">
