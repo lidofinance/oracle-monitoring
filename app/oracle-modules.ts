@@ -30,6 +30,31 @@ export function availableModules<T>(
 // DataBus event ids sent by lido-oracle (keccak256 of the event name).
 export type TelemetryEvent = "startup" | "report" | "diagnostic" | "unknown";
 
+// Event kinds in display order, with what the oracle sends in each of them
+// (see `TelemetryEventId` in lido-oracle).
+export const TELEMETRY_EVENT_KINDS: ReadonlyArray<{
+  key: TelemetryEvent;
+  label: string;
+  full: string;
+}> = [
+  {
+    key: "report",
+    label: "Report",
+    full: "OracleReport: hash and data of a built report",
+  },
+  {
+    key: "startup",
+    label: "Startup",
+    full: "OracleStartup: Keys API version and DelegationContract, sent when the oracle starts",
+  },
+  {
+    key: "diagnostic",
+    label: "Diagnostic",
+    full: "Diagnostic: how much performance data is ready for the CSM and CM reports",
+  },
+  { key: "unknown", label: "Other", full: "Any other DataBus event id" },
+];
+
 // keccak256("OracleStartup")
 export const ORACLE_STARTUP_TOPIC =
   "0x84728a84725a206f8ec5a2ab533d0890029ade3fca0563b61dca1be60d73f40c";

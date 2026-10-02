@@ -1,12 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Interface } from "ethers";
 
+import { CONSENSUS_CONTRACTS } from "../../consensus-contracts";
 import {
   type OracleModule,
   type ParsedOracleReport,
   type RawTransaction,
   type ReportCandidate,
+  type RpcLog,
+  REPORT_EVENT_TOPICS,
+  collectReportLogs,
+  parseExtraDataReport,
+  parseHashVote,
   parseOracleReport,
+  safeHashVoteFrames,
   unwrapReportTransaction,
 } from "../../oracle-reports";
 import { HOODI_CHAIN_ID, MAINNET_CHAIN_ID, serverRpcs } from "../../rpc-config";
@@ -19,20 +26,22 @@ type RpcResponse<T> = {
   error?: { message?: string };
 };
 
-// Report receivers (the oracle contracts that accept submitReportData) per
-// network. A module missing on a network is simply not tracked there. RPC
-// endpoints come from app/rpc-config.ts.
+// Report receivers (the oracle contracts that accept submitReportData) and
+// HashConsensus contracts per network. A module missing on a network is
+// simply not tracked there. RPC endpoints come from app/rpc-config.ts.
 const CONFIG: Record<
   NetworkKey,
   {
     chainId: number;
     stakingRouter: string;
     contracts: Partial<Record<OracleModule, string>>;
+    consensus: Partial<Record<OracleModule, string>>;
   }
 > = {
   mainnet: {
     chainId: MAINNET_CHAIN_ID,
     stakingRouter: "0xFdDf38947aFB03C621C71b06C9C70bce73f12999",
+    consensus: CONSENSUS_CONTRACTS.mainnet,
     contracts: {
       ao: "0x852deD011285fe67063a08005c71a85690503Cee",
       vebo: "0x0De4Ea0184c2ad0BacA7183356Aea5B8d5Bf5c6e",
@@ -43,6 +52,7 @@ const CONFIG: Record<
   hoodi: {
     chainId: HOODI_CHAIN_ID,
     stakingRouter: "0xCc820558B39ee15C7C45B59390B503b83fb499A8",
+    consensus: CONSENSUS_CONTRACTS.hoodi,
     contracts: {
       ao: "0xcb883B1bD0a41512b42D2dB267F2A2cd919FB216",
       vebo: "0x8664d394C2B3278F26A1B44B967aEf99707eeAB2",
@@ -52,9 +62,6 @@ const CONFIG: Record<
     },
   },
 };
-
-const PROCESSING_STARTED_TOPIC =
-  "0xf73febded7d4502284718948a3e1d75406151c6326bde069424a584a4f6af87a";
 
 const STAKING_ROUTER = new Interface([
   "function getStakingModule(uint256) view returns ((uint24 id,address stakingModuleAddress,uint16 stakingModuleFee,uint16 treasuryFee,uint16 stakeShareLimit,uint8 status,string name,uint64 lastDepositAt,uint256 lastDepositBlock,uint256 exitedValidatorsCount,uint16 priorityExitShareThreshold,uint64 maxDepositsPerBlock,uint64 minDepositBlockDistance))",
@@ -186,14 +193,16 @@ async function rpcBatchOnce<T>(
   throw lastError ?? new Error("No RPC endpoint responded");
 }
 
-// Discover report transactions through the ProcessingStarted event the
-// receiver emits on submitReportData. Unlike an address transaction list this
-// also finds calls that arrive through EDF DelegationContracts, where the
-// receiver is not the transaction recipient.
-async function rpcReportCandidates(
+// Discover the report phases through events: hash votes in HashConsensus,
+// ProcessingStarted the receiver emits on submitReportData and
+// ExtraDataSubmitted of the Accounting Oracle. Unlike an address transaction
+// list this also finds calls that arrive through EDF DelegationContracts,
+// where the receiver is not the transaction recipient. Logs are returned in
+// chain order, together with the number of block ranges that failed.
+async function rpcReportLogs(
   rpcs: readonly string[],
-  contracts: Partial<Record<OracleModule, string>>,
-): Promise<ReportCandidate[]> {
+  config: (typeof CONFIG)[NetworkKey],
+): Promise<{ logs: RpcLog[]; failedRanges: number; ranges: number }> {
   const [latestHex] = await rpcBatch<string>(rpcs, "eth_blockNumber", [[]]);
   if (!latestHex) throw new Error("Latest block was unavailable");
   const latest = Number.parseInt(latestHex, 16);
@@ -202,43 +211,25 @@ async function rpcReportCandidates(
   for (let from = fromBlock; from <= latest; from += 10_000) {
     ranges.push([
       {
-        address: Object.values(contracts),
-        topics: [PROCESSING_STARTED_TOPIC],
+        address: [
+          ...Object.values(config.contracts),
+          ...Object.values(config.consensus),
+        ],
+        topics: [REPORT_EVENT_TOPICS],
         fromBlock: `0x${from.toString(16)}`,
         toBlock: `0x${Math.min(latest, from + 9_999).toString(16)}`,
       },
     ]);
   }
-  const results = await rpcBatch<
-    Array<{ address: string; transactionHash: string }>
-  >(rpcs, "eth_getLogs", ranges, {
+  const results = await rpcBatch<RpcLog[]>(rpcs, "eth_getLogs", ranges, {
     rejectAllErrors: true,
     chunkSize: LOG_BATCH_SIZE,
   });
-  const entries = Object.entries(contracts) as Array<[OracleModule, string]>;
-  const moduleByAddress = new Map(
-    entries.map(([module, address]) => [address.toLowerCase(), module]),
-  );
-  const candidates = results.flatMap((logs) =>
-    (logs ?? []).flatMap((log) => {
-      const address = log.address.toLowerCase();
-      const reportModule = moduleByAddress.get(address);
-      return reportModule
-        ? [
-            {
-              hash: log.transactionHash.toLowerCase(),
-              module: reportModule,
-              address,
-            },
-          ]
-        : [];
-    }),
-  );
-  return entries.flatMap(([reportModule]) =>
-    candidates
-      .filter((candidate) => candidate.module === reportModule)
-      .slice(-40),
-  );
+  return {
+    logs: results.flatMap((logs) => logs ?? []),
+    failedRanges: results.filter((logs) => logs === null).length,
+    ranges: ranges.length,
+  };
 }
 
 // Transactions of each receiver listed by Etherscan. Used only when an API
@@ -265,28 +256,54 @@ async function etherscanReportCandidates(
   return discovered.flat();
 }
 
-async function discoverReportCandidates(
+async function discoverReports(
   config: (typeof CONFIG)[NetworkKey],
   rpcs: readonly string[],
+  hashVoteFrames: number,
 ) {
   const apiKey = process.env.ETHERSCAN_API_KEY?.trim();
-  const sources = [
-    rpcReportCandidates(rpcs, config.contracts),
-    ...(apiKey
-      ? [etherscanReportCandidates(config.chainId, config.contracts, apiKey)]
-      : []),
-  ];
-  const results = await Promise.allSettled(sources);
-  const candidates = results.flatMap((result) =>
-    result.status === "fulfilled" ? result.value : [],
+  const [logsResult, etherscanResult] = await Promise.allSettled([
+    rpcReportLogs(rpcs, config),
+    apiKey
+      ? etherscanReportCandidates(config.chainId, config.contracts, apiKey)
+      : Promise.resolve<ReportCandidate[]>([]),
+  ]);
+  const { logs, failedRanges, ranges } =
+    logsResult.status === "fulfilled"
+      ? logsResult.value
+      : { logs: [], failedRanges: 0, ranges: 0 };
+  // Hash votes and extra data are found only through logs, so a failed log
+  // query must be visible instead of looking like a quiet period.
+  const warnings: string[] = [];
+  if (logsResult.status === "rejected") {
+    warnings.push(
+      "Event logs could not be read: hash votes, extra data and recent report data may be missing.",
+    );
+  } else if (failedRanges) {
+    warnings.push(
+      `${failedRanges} of ${ranges} log ranges could not be read: some reports may be missing.`,
+    );
+  }
+  const fromLogs = collectReportLogs(
+    logs,
+    config.contracts,
+    config.consensus,
+    hashVoteFrames,
   );
-  if (!candidates.length) {
-    const failure = results.find((result) => result.status === "rejected");
+  // Candidates from logs go first: only they know the extra data progress.
+  const candidates = [
+    ...fromLogs.candidates,
+    ...(etherscanResult.status === "fulfilled" ? etherscanResult.value : []),
+  ];
+  if (!candidates.length && !fromLogs.hashVotes.length) {
+    const failure = [logsResult, etherscanResult].find(
+      (result) => result.status === "rejected",
+    );
     throw failure?.status === "rejected" && failure.reason instanceof Error
       ? failure.reason
       : new Error("No recent contract transactions were available");
   }
-  return candidates;
+  return { logs, candidates, hashVotes: fromLogs.hashVotes, warnings };
 }
 
 async function resolveVeboOperatorNames(
@@ -457,16 +474,23 @@ export async function GET(request: NextRequest) {
   const config = CONFIG[network];
   const rpcs = serverRpcs(network);
   try {
-    const candidates = await discoverReportCandidates(config, rpcs);
+    const { logs, candidates, hashVotes, warnings } = await discoverReports(
+      config,
+      rpcs,
+      safeHashVoteFrames(request.nextUrl.searchParams.get("frames")),
+    );
 
-    const uniqueHashes = [...new Set(candidates.map(({ hash }) => hash))];
+    // The first candidate of a transaction wins, see discoverReports.
+    const candidateByHash = new Map<string, ReportCandidate>();
+    for (const candidate of candidates) {
+      if (!candidateByHash.has(candidate.hash)) {
+        candidateByHash.set(candidate.hash, candidate);
+      }
+    }
     const transactions = await rpcBatch<RawTransaction>(
       rpcs,
       "eth_getTransactionByHash",
-      uniqueHashes.map((hash) => [hash]),
-    );
-    const candidateByHash = new Map(
-      candidates.map((candidate) => [candidate.hash, candidate]),
+      [...candidateByHash.keys()].map((hash) => [hash]),
     );
     const reportTransactions = transactions.flatMap((transaction) => {
       if (!transaction) return [];
@@ -474,34 +498,51 @@ export async function GET(request: NextRequest) {
       const report = candidate
         ? unwrapReportTransaction(transaction, candidate)
         : null;
-      return report ? [report] : [];
+      return report && candidate
+        ? [{ ...report, extraData: candidate.extraData }]
+        : [];
     });
 
+    // Logs of recent clients carry the block timestamp; the other blocks
+    // are fetched.
+    const timestampByBlock = new Map<string, number>();
+    for (const log of logs) {
+      if (log.blockTimestamp) {
+        timestampByBlock.set(
+          log.blockNumber,
+          Number.parseInt(log.blockTimestamp, 16),
+        );
+      }
+    }
     const blockNumbers = [
-      ...new Set(
-        reportTransactions.map(({ transaction }) => transaction.blockNumber),
-      ),
-    ];
+      ...new Set([
+        ...reportTransactions.map(({ transaction }) => transaction.blockNumber),
+        ...hashVotes.map((vote) => vote.blockNumber),
+      ]),
+    ].filter((block) => !timestampByBlock.has(block));
     const blocks = await rpcBatch<{ timestamp: string }>(
       rpcs,
       "eth_getBlockByNumber",
       blockNumbers.map((block) => [block, false]),
     );
-    const timestampByBlock = new Map(
-      blockNumbers.map((block, index) => [
+    blockNumbers.forEach((block, index) => {
+      timestampByBlock.set(
         block,
         blocks[index] ? Number.parseInt(blocks[index]!.timestamp, 16) : 0,
-      ]),
-    );
+      );
+    });
 
-    const reports = reportTransactions
-      .map(({ transaction, module }) =>
-        parseOracleReport(
-          module,
-          transaction,
-          timestampByBlock.get(transaction.blockNumber) ?? 0,
-        ),
-      )
+    const reports = [
+      ...reportTransactions.map(({ transaction, module, extraData }) => {
+        const timestamp = timestampByBlock.get(transaction.blockNumber) ?? 0;
+        return extraData
+          ? parseExtraDataReport(transaction, timestamp, extraData)
+          : parseOracleReport(module, transaction, timestamp);
+      }),
+      ...hashVotes.map((vote) =>
+        parseHashVote(vote, timestampByBlock.get(vote.blockNumber) ?? 0),
+      ),
+    ]
       .filter((report) => report !== null)
       .sort((a, b) => b.blockNumber - a.blockNumber);
     await resolveVeboOperatorNames(
@@ -515,6 +556,7 @@ export async function GET(request: NextRequest) {
         network,
         contracts: config.contracts,
         reports,
+        warnings,
       },
       {
         headers: {

@@ -15,10 +15,15 @@ or database.
   balances and the EDF DelegationContract behind each seat (delegate key,
   owner, pending delegate, cooldown, status).
 - Telemetry details - the raw DataBus messages sent by oracle operators, with
-  filters by module and a search by operator, block or transaction.
-- Oracle reports - decoded `submitReportData` calls received by the oracle
-  contracts, either directly or through Execution Delegation Framework
-  (LIP-37) DelegationContracts.
+  multi-select filters by module, event kind (report, startup, diagnostic)
+  and holder, and a search by operator, block or transaction.
+- Oracle reports - all three report phases: member votes for the report hash
+  in HashConsensus, decoded `submitReportData` calls and Accounting Oracle
+  extra data, sent either directly or through Execution Delegation Framework
+  (LIP-37) DelegationContracts. Multi-select filters by module, phase and
+  holder show the number of reports behind every option; hash votes are
+  loaded for the latest 10, 20 or 40 frames per module, within the 35-day
+  history window of the report API.
 
 Tracked modules: Accounting Oracle (AO), Validator Exit Bus Oracle (VEBO),
 CSM fee oracle (CSM), CSM 0x02 fee oracle (CSM 0x02, Hoodi only for now) and
@@ -62,7 +67,7 @@ npm run start    # serve the production build (PORT=3000 by default)
 ## Tests and checks
 
 ```bash
-npm run test:unit   # unit tests for module mapping and report decoding
+npm run test:unit   # unit tests for filters, module mapping and report decoding
 npm test            # unit tests + production build + server-rendered smoke test
 npm run lint
 npm run typecheck
@@ -93,12 +98,13 @@ Contract addresses and operator labels live in the code:
 
 - `app/oracle-modules.ts` - the list of oracle modules and the telemetry
   module mapping.
-- `app/oracle-monitor.tsx` - HashConsensus addresses, DataBus address and
-  operator labels (member EOAs and EDF DelegationContracts).
+- `app/consensus-contracts.ts` - HashConsensus addresses.
+- `app/oracle-monitor.tsx` - DataBus address and operator labels (member EOAs
+  and EDF DelegationContracts).
 - `app/api/oracle-reports/route.ts` - report receiver addresses.
 
 To add a module on a network, add its HashConsensus address to
-`app/oracle-monitor.tsx` and its receiver address to
+`app/consensus-contracts.ts` and its receiver address to
 `app/api/oracle-reports/route.ts`. Modules missing on a network are not shown
 there.
 

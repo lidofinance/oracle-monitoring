@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  TELEMETRY_EVENT_KINDS,
   availableModules,
   isOracleModule,
   moduleFromMessage,
@@ -61,6 +62,13 @@ test("DataBus event ids map to telemetry event kinds", () => {
     "diagnostic",
   );
   assert.equal(telemetryEventFromTopic("0x00"), "unknown");
+});
+
+test("every telemetry event kind has one filter option", () => {
+  assert.deepEqual(
+    TELEMETRY_EVENT_KINDS.map(({ key }) => key),
+    ["report", "startup", "diagnostic", "unknown"],
+  );
 });
 
 test("startup telemetry exposes the oracle setup", () => {

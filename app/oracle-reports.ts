@@ -1,4 +1,4 @@
-import { formatUnits, Interface } from "ethers";
+import { type EventFragment, formatUnits, Interface } from "ethers";
 
 import type { OracleModule } from "./oracle-modules";
 
@@ -22,15 +22,54 @@ export type VeboOperatorSummary = {
   pubkeys: string[];
 };
 
+// A report goes through up to three phases (see the Accounting module in
+// lido-oracle): every member votes for the report hash in HashConsensus, one
+// member submits the report data, and for the Accounting Oracle the extra
+// data follows.
+export type ReportPhase = "hash" | "data" | "extra";
+
+export const REPORT_PHASES: ReadonlyArray<{
+  key: ReportPhase;
+  label: string;
+  full: string;
+}> = [
+  { key: "hash", label: "Hash", full: "Phase 1 · report hash" },
+  { key: "data", label: "Data", full: "Phase 2 · report data" },
+  { key: "extra", label: "Extra data", full: "Phase 3 · extra data" },
+];
+
+// How many latest frames of hash votes the report API returns per module.
+// Every frame has one vote per committee member, so the depth is limited.
+export const HASH_VOTE_FRAMES: readonly number[] = [10, 20, 40];
+export const DEFAULT_HASH_VOTE_FRAMES = 10;
+
+export function safeHashVoteFrames(value: string | null) {
+  const frames = Number(value);
+  return HASH_VOTE_FRAMES.includes(frames) ? frames : DEFAULT_HASH_VOTE_FRAMES;
+}
+
+// Latest report data and extra data transactions kept per module.
+const REPORTS_PER_MODULE = 40;
+
+export type ExtraDataItem = {
+  index: number;
+  type: number;
+  moduleId: number;
+  operators: Array<{ operatorId: string; value: string }>;
+};
+
 export type ParsedOracleReport = {
+  phase: ReportPhase;
   module: OracleModule;
   blockNumber: number;
   transactionHash: string;
+  // The committee member for a hash vote, the submitter for the other phases.
   sender: string;
+  // The HashConsensus contract for a hash vote, the oracle contract otherwise.
   receiver: string;
   timestamp: number;
   refSlot: number;
-  contractVersion: string;
+  contractVersion?: string;
   fields: ReportField[];
   veboOperators?: VeboOperatorSummary[];
   rawJson: string;
@@ -48,10 +87,44 @@ export type RpcTransaction = {
 // have no recipient.
 export type RawTransaction = Omit<RpcTransaction, "to"> & { to: string | null };
 
+// A log as returned by eth_getLogs. Recent clients add the block timestamp.
+export type RpcLog = {
+  address: string;
+  topics: string[];
+  data: string;
+  blockNumber: string;
+  blockTimestamp?: string;
+  transactionHash: string;
+};
+
+// Values of the ExtraDataSubmitted event: the items processed so far for the
+// report and the items the report declared.
+export type ExtraDataProgress = {
+  refSlot: number;
+  itemsProcessed: number;
+  itemsCount: number;
+};
+
+// A transaction that may carry a report. `extraData` is set when the
+// transaction was found through an ExtraDataSubmitted event (phase 3).
 export type ReportCandidate = {
   hash: string;
   module: OracleModule;
   address: string;
+  extraData?: ExtraDataProgress;
+};
+
+// A member vote for a report hash (phase 1), read from a ReportReceived
+// event. `consensus` is the hash that reached the quorum for the same slot.
+export type HashVote = {
+  module: OracleModule;
+  address: string;
+  member: string;
+  refSlot: number;
+  report: string;
+  transactionHash: string;
+  blockNumber: string;
+  consensus?: { report: string; support: number };
 };
 
 // Execution Delegation Framework (LIP-37) DelegationContract entrypoint. Under
@@ -84,6 +157,29 @@ const FEE_V3 = new Interface([
 const FEE_V2 = new Interface([
   "function submitReportData((uint256 consensusVersion,uint256 refSlot,bytes32 treeRoot,string treeCid,string logCid,uint256 distributed) data,uint256 contractVersion)",
 ]);
+
+const ACCOUNTING_EXTRA_DATA = new Interface([
+  "function submitReportExtraDataEmpty()",
+  "function submitReportExtraDataList(bytes data)",
+]);
+
+// Events that mark the report phases: ReportReceived, ConsensusReached and
+// ConsensusLost come from HashConsensus, ProcessingStarted is emitted by a
+// receiver on submitReportData and ExtraDataSubmitted by the Accounting
+// Oracle on every extra data transaction.
+const REPORT_EVENTS = new Interface([
+  "event ReportReceived(uint256 indexed refSlot, address indexed member, bytes32 report)",
+  "event ConsensusReached(uint256 indexed refSlot, bytes32 report, uint256 support)",
+  "event ConsensusLost(uint256 indexed refSlot)",
+  "event ProcessingStarted(uint256 indexed refSlot, bytes32 hash)",
+  "event ExtraDataSubmitted(uint256 indexed refSlot, uint256 itemsProcessed, uint256 itemsCount)",
+]);
+
+export const REPORT_EVENT_TOPICS: readonly string[] = REPORT_EVENTS.fragments
+  .filter((fragment) => fragment.type === "event")
+  .map((fragment) => (fragment as EventFragment).topicHash);
+
+const ZERO_HASH = `0x${"0".repeat(64)}`;
 
 function compactNumber(value: bigint) {
   return new Intl.NumberFormat("en-US").format(value);
@@ -141,6 +237,14 @@ function decodeVeboRequests(
   return [...operators.values()];
 }
 
+function refSlotField(refSlot: bigint): ReportField {
+  return {
+    label: "Reference slot",
+    value: compactNumber(refSlot),
+    description: "Finalized beacon-chain slot whose state this report describes.",
+  };
+}
+
 function commonFields(
   consensusVersion: bigint,
   refSlot: bigint,
@@ -152,11 +256,7 @@ function commonFields(
       value: consensusVersion.toString(),
       description: "Version of the oracle committee consensus rules.",
     },
-    {
-      label: "Reference slot",
-      value: compactNumber(refSlot),
-      description: "Finalized beacon-chain slot whose state this report describes.",
-    },
+    refSlotField(refSlot),
     {
       label: "Contract version",
       value: contractVersion.toString(),
@@ -310,6 +410,7 @@ function parseAccounting(
   );
 
   return {
+    phase: "data",
     module: "ao",
     blockNumber: Number.parseInt(tx.blockNumber, 16),
     transactionHash: tx.hash,
@@ -374,6 +475,7 @@ function parseVebo(
   ];
 
   return {
+    phase: "data",
     module: "vebo",
     blockNumber: Number.parseInt(tx.blockNumber, 16),
     transactionHash: tx.hash,
@@ -457,6 +559,7 @@ function parseFee(
   }
 
   return {
+    phase: "data",
     module,
     blockNumber: Number.parseInt(tx.blockNumber, 16),
     transactionHash: tx.hash,
@@ -488,9 +591,309 @@ export function parseOracleReport(
   }
 }
 
-// Resolve the submitReportData call behind a report transaction. The call is
-// either sent to the receiver directly (pre-EDF members) or wrapped into a
-// DelegationContract execute(target, data) call (EDF members).
+// Split report logs by phase. The logs must be in chain order. Report data
+// and extra data transactions are returned as candidates to fetch and decode;
+// a hash vote is complete in its log. Only the latest `hashVoteFrames`
+// reference slots of each module keep their votes.
+export function collectReportLogs(
+  logs: readonly RpcLog[],
+  receivers: Partial<Record<OracleModule, string>>,
+  consensus: Partial<Record<OracleModule, string>>,
+  hashVoteFrames: number,
+): { candidates: ReportCandidate[]; hashVotes: HashVote[] } {
+  const modulesByAddress = (contracts: Partial<Record<OracleModule, string>>) =>
+    new Map(
+      (Object.entries(contracts) as Array<[OracleModule, string]>).map(
+        ([module, address]) => [address.toLowerCase(), module],
+      ),
+    );
+  const receiverModules = modulesByAddress(receivers);
+  const consensusModules = modulesByAddress(consensus);
+
+  const reportData = new Map<OracleModule, ReportCandidate[]>();
+  const extraData = new Map<OracleModule, ReportCandidate[]>();
+  const votes = new Map<OracleModule, HashVote[]>();
+  const consensusBySlot = new Map<string, HashVote["consensus"]>();
+  const push = <T>(target: Map<OracleModule, T[]>, module: OracleModule, item: T) => {
+    const items = target.get(module);
+    if (items) items.push(item);
+    else target.set(module, [item]);
+  };
+
+  for (const log of logs) {
+    let event;
+    try {
+      event = REPORT_EVENTS.parseLog(log);
+    } catch {
+      continue;
+    }
+    if (!event) continue;
+    const address = log.address.toLowerCase();
+    const hash = log.transactionHash.toLowerCase();
+    const refSlot = Number(event.args.refSlot);
+    const receiverModule = receiverModules.get(address);
+    const consensusModule = consensusModules.get(address);
+
+    if (receiverModule && event.name === "ProcessingStarted") {
+      push(reportData, receiverModule, { hash, module: receiverModule, address });
+    } else if (receiverModule && event.name === "ExtraDataSubmitted") {
+      push(extraData, receiverModule, {
+        hash,
+        module: receiverModule,
+        address,
+        extraData: {
+          refSlot,
+          itemsProcessed: Number(event.args.itemsProcessed),
+          itemsCount: Number(event.args.itemsCount),
+        },
+      });
+    } else if (consensusModule && event.name === "ReportReceived") {
+      push(votes, consensusModule, {
+        module: consensusModule,
+        address,
+        member: (event.args.member as string).toLowerCase(),
+        refSlot,
+        report: event.args.report as string,
+        transactionHash: hash,
+        blockNumber: log.blockNumber,
+      });
+    } else if (consensusModule && event.name === "ConsensusReached") {
+      consensusBySlot.set(`${consensusModule}:${refSlot}`, {
+        report: event.args.report as string,
+        support: Number(event.args.support),
+      });
+    } else if (consensusModule && event.name === "ConsensusLost") {
+      consensusBySlot.delete(`${consensusModule}:${refSlot}`);
+    }
+  }
+
+  const candidates = [...reportData.values(), ...extraData.values()].flatMap(
+    (moduleCandidates) => moduleCandidates.slice(-REPORTS_PER_MODULE),
+  );
+  const hashVotes = [...votes.entries()].flatMap(([module, moduleVotes]) => {
+    const latestSlots = new Set(
+      [...new Set(moduleVotes.map((vote) => vote.refSlot))]
+        .sort((a, b) => a - b)
+        .slice(-hashVoteFrames),
+    );
+    return moduleVotes
+      .filter((vote) => latestSlots.has(vote.refSlot))
+      .map((vote) => ({
+        ...vote,
+        consensus: consensusBySlot.get(`${module}:${vote.refSlot}`),
+      }));
+  });
+  return { candidates, hashVotes };
+}
+
+export function parseHashVote(
+  vote: HashVote,
+  timestamp: number,
+): ParsedOracleReport {
+  const fields: ReportField[] = [
+    refSlotField(BigInt(vote.refSlot)),
+    {
+      label: "Report hash",
+      value: vote.report,
+      description: "Hash of the report data this member voted for.",
+      mono: true,
+    },
+    {
+      label: "Consensus hash",
+      value: vote.consensus?.report ?? "Not reached",
+      description: "Hash that reached the quorum for this reference slot.",
+      mono: true,
+    },
+    {
+      label: "Vote",
+      value: !vote.consensus
+        ? "Consensus not reached"
+        : vote.consensus.report.toLowerCase() === vote.report.toLowerCase()
+          ? "Matches consensus"
+          : "Differs from consensus",
+      description: "Whether this member voted for the hash that reached the quorum.",
+    },
+  ];
+  if (vote.consensus) {
+    fields.push({
+      label: "Consensus support",
+      value: `${vote.consensus.support} members`,
+      description: "Members that supported the hash when the quorum was reached.",
+    });
+  }
+
+  return {
+    phase: "hash",
+    module: vote.module,
+    blockNumber: Number.parseInt(vote.blockNumber, 16),
+    transactionHash: vote.transactionHash,
+    sender: vote.member,
+    receiver: vote.address,
+    timestamp,
+    refSlot: vote.refSlot,
+    fields,
+    rawJson: JSON.stringify(
+      Object.fromEntries(fields.map((field) => [field.label, field.value])),
+      null,
+      2,
+    ),
+  };
+}
+
+// Extra data item sizes in hex characters (see ExtraDataService in
+// lido-oracle). A chunk is the hash of the next chunk followed by items:
+// | 3 bytes itemIndex | 2 bytes itemType | 3 bytes moduleId |
+// | 8 bytes nodeOpsCount | 8 bytes per operator id | 16 bytes per value |
+const EXTRA_DATA_HASH = 64;
+const EXTRA_DATA_ITEM_HEADER = 32;
+const EXTRA_DATA_OPERATOR_ID = 16;
+const EXTRA_DATA_VALUE = 32;
+
+export function decodeExtraDataList(
+  data: string,
+): { nextHash: string; items: ExtraDataItem[] } | null {
+  const bytes = data.startsWith("0x") ? data.slice(2) : data;
+  if (bytes.length < EXTRA_DATA_HASH) return null;
+
+  const items: ExtraDataItem[] = [];
+  let offset = EXTRA_DATA_HASH;
+  while (offset < bytes.length) {
+    if (bytes.length - offset < EXTRA_DATA_ITEM_HEADER) return null;
+    const count = BigInt(`0x${bytes.slice(offset + 16, offset + 32)}`);
+    const idsStart = offset + EXTRA_DATA_ITEM_HEADER;
+    if (
+      count * BigInt(EXTRA_DATA_OPERATOR_ID + EXTRA_DATA_VALUE) >
+      BigInt(bytes.length - idsStart)
+    ) {
+      return null;
+    }
+    const valuesStart = idsStart + Number(count) * EXTRA_DATA_OPERATOR_ID;
+    items.push({
+      index: Number.parseInt(bytes.slice(offset, offset + 6), 16),
+      type: Number.parseInt(bytes.slice(offset + 6, offset + 10), 16),
+      moduleId: Number.parseInt(bytes.slice(offset + 10, offset + 16), 16),
+      operators: Array.from({ length: Number(count) }, (_, index) => {
+        const id = idsStart + index * EXTRA_DATA_OPERATOR_ID;
+        const value = valuesStart + index * EXTRA_DATA_VALUE;
+        return {
+          operatorId: BigInt(
+            `0x${bytes.slice(id, id + EXTRA_DATA_OPERATOR_ID)}`,
+          ).toString(),
+          value: BigInt(
+            `0x${bytes.slice(value, value + EXTRA_DATA_VALUE)}`,
+          ).toString(),
+        };
+      }),
+    });
+    offset = valuesStart + Number(count) * EXTRA_DATA_VALUE;
+  }
+  return { nextHash: `0x${bytes.slice(0, EXTRA_DATA_HASH)}`, items };
+}
+
+// Item types of the extra data list. Stuck validators are no longer sent
+// but can still appear in old reports.
+const EXTRA_DATA_ITEM_TYPES: Record<number, string> = {
+  1: "Stuck validators",
+  2: "Exited validators",
+};
+
+// Decode an extra data transaction of the Accounting Oracle (phase 3). The
+// reference slot and the progress are not in the calldata, they come from
+// the ExtraDataSubmitted event of the same transaction.
+export function parseExtraDataReport(
+  tx: RpcTransaction,
+  timestamp: number,
+  progress: ExtraDataProgress,
+): ParsedOracleReport | null {
+  let parsed;
+  try {
+    parsed = ACCOUNTING_EXTRA_DATA.parseTransaction({ data: tx.input });
+  } catch {
+    return null;
+  }
+  if (!parsed) return null;
+
+  const isList = parsed.name === "submitReportExtraDataList";
+  const list = isList ? decodeExtraDataList(parsed.args[0] as string) : null;
+  const fields: ReportField[] = [
+    refSlotField(BigInt(progress.refSlot)),
+    {
+      label: "Extra data format",
+      value: isList ? "1 (list)" : "0 (empty)",
+      description: "0 means empty; 1 means a chained list of operator-level updates.",
+    },
+    {
+      label: "Items processed",
+      value: `${progress.itemsProcessed} of ${progress.itemsCount}`,
+      description: "Extra-data items of this report processed after this transaction.",
+    },
+  ];
+
+  if (list) {
+    fields.push(
+      {
+        label: "Items in this transaction",
+        value: list.items.length.toString(),
+        description: "Extra-data items carried by this chunk of the list.",
+      },
+      {
+        label: "Next chunk hash",
+        value: list.nextHash === ZERO_HASH ? "None, this is the last chunk" : list.nextHash,
+        description: "Hash of the next transaction in the extra-data chain.",
+        mono: true,
+      },
+    );
+    // One module can be split into several items, so group them by label.
+    const valuesByLabel = new Map<string, string[]>();
+    for (const item of list.items) {
+      const label = `${EXTRA_DATA_ITEM_TYPES[item.type] ?? `Item type ${item.type}`} · module ${item.moduleId}`;
+      valuesByLabel.set(label, [
+        ...(valuesByLabel.get(label) ?? []),
+        ...item.operators.map(
+          (operator) => `Operator ${operator.operatorId}: ${operator.value}`,
+        ),
+      ]);
+    }
+    for (const [label, values] of valuesByLabel) {
+      fields.push({
+        label,
+        value: values.join(", "),
+        description: "Cumulative validator count reported for each node operator.",
+      });
+    }
+  } else if (isList) {
+    fields.push({
+      label: "Extra data items",
+      value: "Could not be decoded",
+      description: "The chunk does not follow the known extra-data list layout.",
+    });
+  }
+
+  return {
+    phase: "extra",
+    module: "ao",
+    blockNumber: Number.parseInt(tx.blockNumber, 16),
+    transactionHash: tx.hash,
+    sender: tx.from.toLowerCase(),
+    receiver: tx.to,
+    timestamp,
+    refSlot: progress.refSlot,
+    fields,
+    rawJson: JSON.stringify(
+      {
+        fields: Object.fromEntries(fields.map((field) => [field.label, field.value])),
+        items: list?.items ?? [],
+      },
+      null,
+      2,
+    ),
+  };
+}
+
+// Resolve the report call behind a transaction: submitReportData or an extra
+// data submission. The call is either sent to the receiver directly (pre-EDF
+// members) or wrapped into a DelegationContract execute(target, data) call
+// (EDF members).
 export function unwrapReportTransaction(
   transaction: RawTransaction,
   candidate: ReportCandidate,

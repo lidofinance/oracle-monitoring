@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock3,
   Copy,
@@ -28,25 +29,36 @@ import {
 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 
+import { CONSENSUS_CONTRACTS } from "./consensus-contracts";
+import { filterWithCounts, parseSelection, toggleSelection } from "./filters";
 import {
   ORACLE_MODULES,
   ORACLE_STARTUP_TOPIC,
+  TELEMETRY_EVENT_KINDS,
   availableModules,
-  isOracleModule,
   moduleFromMessage,
   parseTelemetrySetup,
   telemetryEventFromTopic,
   type OracleModule,
   type TelemetryEvent,
 } from "./oracle-modules";
-import type { ParsedOracleReport } from "./oracle-reports";
+import {
+  DEFAULT_HASH_VOTE_FRAMES,
+  HASH_VOTE_FRAMES,
+  REPORT_PHASES,
+  safeHashVoteFrames,
+  type ParsedOracleReport,
+  type ReportPhase,
+} from "./oracle-reports";
 import { BROWSER_RPCS, HOODI_CHAIN_ID, MAINNET_CHAIN_ID } from "./rpc-config";
 
 type NetworkKey = "mainnet" | "hoodi";
@@ -146,11 +158,33 @@ type Snapshot = Record<NetworkKey, NetworkSnapshot>;
 type OracleReportsPayload = {
   contracts: Partial<Record<ModuleKey, string>>;
   reports: ParsedOracleReport[];
+  // Set when a part of the report history could not be read.
+  warnings?: string[];
 };
 
-// HashConsensus contracts per module. The Accounting Oracle consensus is
-// required because its chain config is used for slot timing; other modules
-// are tracked only on the networks where they are deployed.
+// A transaction is listed once per phase and module.
+function reportKey(report: ParsedOracleReport) {
+  return `${report.phase}:${report.module}:${report.transactionHash}`;
+}
+
+// Filters kept in the URL. Telemetry has modules, event kinds, holders and a
+// search query; oracle reports have modules, phases, holders and the hash
+// vote depth. Holders are DelegationContract addresses. The lists are
+// multi-select filters, see filters.ts.
+type RouteFilters = {
+  modules: ModuleKey[];
+  events: TelemetryEvent[];
+  telemetryHolders: string[];
+  query: string;
+  oracleModules: ModuleKey[];
+  phases: ReportPhase[];
+  holders: string[];
+  frames: number;
+};
+
+const REPORT_PHASE_KEYS = REPORT_PHASES.map(({ key }) => key);
+const TELEMETRY_EVENT_KEYS = TELEMETRY_EVENT_KINDS.map(({ key }) => key);
+
 type NetworkConfig = {
   label: string;
   chainLabel: string;
@@ -167,25 +201,14 @@ const NETWORKS: Record<NetworkKey, NetworkConfig> = {
     chainLabel: "Ethereum",
     rpc: BROWSER_RPCS.mainnet,
     explorer: "https://etherscan.io",
-    consensus: {
-      ao: "0xD624B08C83bAECF0807Dd2c6880C3154a5F0B288",
-      vebo: "0x7FaDB6358950c5fAA66Cb5EB8eE5147De3df355a",
-      csm: "0x71093efF8D8599b5fA340D665Ad60fA7C80688e4",
-      cm: "0x902D64c93F6595339aA46105627a085591051aFb",
-    },
+    consensus: CONSENSUS_CONTRACTS.mainnet,
   },
   hoodi: {
     label: "Hoodi",
     chainLabel: "Testnet",
     rpc: BROWSER_RPCS.hoodi,
     explorer: "https://hoodi.etherscan.io",
-    consensus: {
-      ao: "0x32EC59a78abaca3f91527aeB2008925D5AaC1eFC",
-      vebo: "0x30308CD8844fb2DB3ec4D056F1d475a802DCA07c",
-      csm: "0x54f74a10e4397dDeF85C4854d9dfcA129D72C637",
-      csm_0x02: "0x41142D077860906B0A7Debb270f1B8e7d1c8BF34",
-      cm: "0x920883908A78c1554f682006a8aB32E62Be09F33",
-    },
+    consensus: CONSENSUS_CONTRACTS.hoodi,
   },
 };
 
@@ -342,12 +365,24 @@ function safeNetwork(value: string | null): NetworkKey {
   return value === "hoodi" || value === "mainnet" ? value : "mainnet";
 }
 
-function safeModule(value: string | null): ModuleKey | "all" {
-  return isOracleModule(value) ? value : "all";
+function moduleKeysFor(network: NetworkKey): ModuleKey[] {
+  return availableModules(NETWORKS[network].consensus).map(({ key }) => key);
 }
 
-function moduleLabel(key: ModuleKey) {
-  return MODULES.find((module) => module.key === key)?.label ?? key;
+// Holder behind a report sender. Current seats are resolved from the chain;
+// a legacy EOA that already left the committee is matched by operator label.
+function holderContractFor(
+  network: NetworkKey,
+  sender: string,
+  holderByMember: Map<string, Holder>,
+) {
+  const label = LABELS[sender];
+  return (
+    holderByMember.get(sender)?.contract ??
+    (label
+      ? HOLDER_CONTRACTS[network].find((contract) => LABELS[contract] === label)
+      : undefined)
+  );
 }
 
 function safeJson(text: string) {
@@ -895,6 +930,143 @@ function ModulePill({ module }: { module: ModuleKey | "unknown" }) {
   return <span className={`module-pill module-${module}`}>{label}</span>;
 }
 
+function eventLabel(event: TelemetryEvent) {
+  return TELEMETRY_EVENT_KINDS.find((item) => item.key === event)?.label ?? "Other";
+}
+
+type FilterOption<T extends string> = {
+  value: T;
+  label: string;
+  title?: string;
+};
+
+// A toolbar button that opens a menu below it. The menu closes on a click
+// outside and on Escape.
+function Dropdown({
+  label,
+  value,
+  active = false,
+  children,
+}: {
+  label: string;
+  // Short text of the current choice, shown on the button.
+  value: string;
+  active?: boolean;
+  children: (close: () => void) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (event: MouseEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div className="filter-menu" ref={root}>
+      <button
+        type="button"
+        className={`filter-menu-button${active ? " active" : ""}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+      >
+        {label} <strong>{value}</strong>
+        <ChevronDown size={13} />
+      </button>
+      {open && (
+        <div className="filter-menu-list" role="menu" aria-label={label}>
+          {children(() => setOpen(false))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A multi-select filter: a menu of options with the number of items behind
+// every option. The button shows what is selected.
+function FilterMenu<T extends string>({
+  label,
+  options,
+  selected,
+  counts,
+  onChange,
+}: {
+  label: string;
+  options: FilterOption<T>[];
+  selected: readonly T[];
+  counts: Map<string, number>;
+  onChange: (selected: T[]) => void;
+}) {
+  const values = options.map(({ value }) => value);
+  const chosen = options.filter(({ value }) => selected.includes(value));
+  const summary = !chosen.length
+    ? "All"
+    : chosen.length > 2
+      ? `${chosen.length} selected`
+      : chosen.map((option) => option.label).join(", ");
+  return (
+    <Dropdown label={label} value={summary} active={chosen.length > 0}>
+      {(close) => (
+        <>
+          {options.map(({ value, label: text, title }) => {
+            const checked = selected.includes(value);
+            const count = counts.get(value) ?? 0;
+            return (
+              <button
+                type="button"
+                key={value}
+                role="menuitemcheckbox"
+                aria-checked={checked}
+                className={count ? "" : "empty"}
+                title={title}
+                onClick={() => onChange(toggleSelection(selected, value, values))}
+              >
+                <span className="filter-menu-box">
+                  {checked && <Check size={11} />}
+                </span>
+                {text}
+                <small>{count.toLocaleString()}</small>
+              </button>
+            );
+          })}
+          <footer>
+            <button
+              type="button"
+              disabled={!selected.length}
+              onClick={() => onChange([])}
+            >
+              Clear
+            </button>
+            <button type="button" onClick={close}>
+              Done
+            </button>
+          </footer>
+        </>
+      )}
+    </Dropdown>
+  );
+}
+
+function PhasePill({ phase }: { phase: ReportPhase }) {
+  const item = REPORT_PHASES.find(({ key }) => key === phase);
+  return (
+    <span className={`module-pill phase-${phase}`} title={item?.full}>
+      {item?.label ?? phase}
+    </span>
+  );
+}
+
 function BalanceChip({
   label,
   address,
@@ -1155,7 +1327,10 @@ function OracleReportInspector({
     <>
       <header className="inspector-header">
         <div>
-          <div className="eyebrow">Consensus report</div>
+          <div className="eyebrow">
+            {REPORT_PHASES.find(({ key }) => key === report.phase)?.full ??
+              "Consensus report"}
+          </div>
           <h2>Block {report.blockNumber.toLocaleString()}</h2>
         </div>
         <div className="inspector-actions">
@@ -1183,7 +1358,7 @@ function OracleReportInspector({
           <ModulePill module={report.module} />
         </div>
         <div>
-          <span>Submitted by</span>
+          <span>{report.phase === "hash" ? "Voted by" : "Submitted by"}</span>
           <strong>{LABELS[report.sender] ?? shorten(report.sender, 7, 5)}</strong>
         </div>
         <div>
@@ -1191,7 +1366,7 @@ function OracleReportInspector({
           <strong>{formatTime(report.timestamp)}</strong>
         </div>
         <div>
-          <span>Receiver</span>
+          <span>{report.phase === "hash" ? "HashConsensus" : "Receiver"}</span>
           <a
             href={`${explorer}/address/${report.receiver}`}
             target="_blank"
@@ -1281,12 +1456,21 @@ export default function OracleMonitor() {
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [openMessage, setOpenMessage] = useState<BusMessage | null>(null);
   const [selectedReport, setSelectedReport] = useState<BusMessage | null>(null);
-  const [moduleFilter, setModuleFilter] = useState<ModuleKey | "all">("all");
-  const [oracleModuleFilter, setOracleModuleFilter] = useState<
-    ModuleKey | "all"
-  >("all");
+  // Multi-select filters: an empty list means the filter is off.
+  const [moduleFilter, setModuleFilter] = useState<ModuleKey[]>([]);
+  const [eventFilter, setEventFilter] = useState<TelemetryEvent[]>([]);
+  const [telemetryHolderFilter, setTelemetryHolderFilter] = useState<string[]>(
+    [],
+  );
+  const [oracleModuleFilter, setOracleModuleFilter] = useState<ModuleKey[]>([]);
+  const [oraclePhaseFilter, setOraclePhaseFilter] = useState<ReportPhase[]>([]);
+  const [oracleHolderFilter, setOracleHolderFilter] = useState<string[]>([]);
+  const [hashVoteFrames, setHashVoteFrames] = useState(
+    DEFAULT_HASH_VOTE_FRAMES,
+  );
+  // Report API responses by network and hash vote depth.
   const [oraclePayloads, setOraclePayloads] = useState<
-    Partial<Record<NetworkKey, OracleReportsPayload>>
+    Partial<Record<string, OracleReportsPayload>>
   >({});
   const [oracleLoading, setOracleLoading] = useState(false);
   const [oracleError, setOracleError] = useState<string | null>(null);
@@ -1299,19 +1483,65 @@ export default function OracleMonitor() {
     (
       nextView: ViewKey,
       nextNetwork = network,
-      nextModule =
-        nextView === "oracle" ? oracleModuleFilter : moduleFilter,
-      nextQuery = query,
+      overrides: Partial<RouteFilters> = {},
     ) => {
+      const filters: RouteFilters = {
+        modules: moduleFilter,
+        events: eventFilter,
+        telemetryHolders: telemetryHolderFilter,
+        query,
+        oracleModules: oracleModuleFilter,
+        phases: oraclePhaseFilter,
+        holders: oracleHolderFilter,
+        frames: hashVoteFrames,
+        ...overrides,
+      };
       const params = new URLSearchParams();
       params.set("network", nextNetwork);
-      if (nextView !== "overview") params.set("module", nextModule);
-      if (nextView === "telemetry" && nextQuery.trim()) {
-        params.set("search", nextQuery.trim());
+      const setList = (name: string, values: readonly string[]) => {
+        if (values.length) params.set(name, values.join(","));
+      };
+      // Modules and holders differ per network, so the ones missing on the
+      // next network do not survive a switch.
+      const networkModules = moduleKeysFor(nextNetwork);
+      const networkHolders = (holders: readonly string[]) =>
+        holders.filter((holder) =>
+          HOLDER_CONTRACTS[nextNetwork].includes(holder),
+        );
+      if (nextView === "telemetry") {
+        setList(
+          "module",
+          filters.modules.filter((key) => networkModules.includes(key)),
+        );
+        setList("event", filters.events);
+        setList("holder", networkHolders(filters.telemetryHolders));
+        if (filters.query.trim()) params.set("search", filters.query.trim());
       }
-      return `${VIEW_ROUTES[nextView]}?${params.toString()}`;
+      if (nextView === "oracle") {
+        setList(
+          "module",
+          filters.oracleModules.filter((key) => networkModules.includes(key)),
+        );
+        setList("phase", filters.phases);
+        setList("holder", networkHolders(filters.holders));
+        if (filters.frames !== DEFAULT_HASH_VOTE_FRAMES) {
+          params.set("frames", String(filters.frames));
+        }
+      }
+      // Keep the commas of the lists readable.
+      return `${VIEW_ROUTES[nextView]}?${params.toString().replaceAll("%2C", ",")}`;
     },
-    [moduleFilter, network, oracleModuleFilter, query],
+    [
+      eventFilter,
+      hashVoteFrames,
+      moduleFilter,
+      network,
+      oracleHolderFilter,
+      oracleModuleFilter,
+      oraclePhaseFilter,
+      query,
+      telemetryHolderFilter,
+    ],
   );
 
   const currentRouteUrl =
@@ -1327,35 +1557,59 @@ export default function OracleMonitor() {
   if (syncedRouteKey !== routeKey) {
     setSyncedRouteKey(routeKey);
     const nextView = viewFromPath(pathname);
-    const nextModule = safeModule(searchParams.get("module"));
+    const nextNetwork = safeNetwork(searchParams.get("network"));
+    const nextModules = parseSelection(
+      searchParams.get("module"),
+      moduleKeysFor(nextNetwork),
+    );
     const nextQuery = searchParams.get("search") ?? searchParams.get("q") ?? "";
+    const nextHolders = parseSelection(
+      searchParams.get("holder"),
+      HOLDER_CONTRACTS[nextNetwork],
+    );
     setView(nextView);
-    setNetwork(safeNetwork(searchParams.get("network")));
+    setNetwork(nextNetwork);
     if (nextView === "telemetry") {
-      setModuleFilter(nextModule);
+      setModuleFilter(nextModules);
+      setEventFilter(
+        parseSelection(searchParams.get("event"), TELEMETRY_EVENT_KEYS),
+      );
+      setTelemetryHolderFilter(nextHolders);
       setQuery(nextQuery);
     } else {
       setQuery("");
     }
     if (nextView === "oracle") {
-      setOracleModuleFilter(nextModule);
+      setOracleModuleFilter(nextModules);
+      setOraclePhaseFilter(
+        parseSelection(searchParams.get("phase"), REPORT_PHASE_KEYS),
+      );
+      setOracleHolderFilter(nextHolders);
+      setHashVoteFrames(safeHashVoteFrames(searchParams.get("frames")));
     }
     setSelectedReport(null);
     setSelectedOracleReport(null);
   }
 
   const navigate = useCallback(
-    (nextView: ViewKey, nextNetwork = network, nextModule?: ModuleKey | "all") => {
-      router.push(
-        routeFor(
-          nextView,
-          nextNetwork,
-          nextModule ??
-            (nextView === "oracle" ? oracleModuleFilter : moduleFilter),
-        ),
-      );
+    (
+      nextView: ViewKey,
+      nextNetwork = network,
+      overrides?: Partial<RouteFilters>,
+    ) => {
+      // The route sync above runs only after the navigation commits. Apply a
+      // new selection right away, so the chips respond at once and a quick
+      // second click builds on the first one.
+      if (overrides?.modules) setModuleFilter(overrides.modules);
+      if (overrides?.events) setEventFilter(overrides.events);
+      if (overrides?.telemetryHolders)
+        setTelemetryHolderFilter(overrides.telemetryHolders);
+      if (overrides?.oracleModules) setOracleModuleFilter(overrides.oracleModules);
+      if (overrides?.phases) setOraclePhaseFilter(overrides.phases);
+      if (overrides?.holders) setOracleHolderFilter(overrides.holders);
+      router.push(routeFor(nextView, nextNetwork, overrides));
     },
-    [moduleFilter, network, oracleModuleFilter, routeFor, router],
+    [network, routeFor, router],
   );
 
   const rpcChoiceRaw = useSyncExternalStore(
@@ -1392,13 +1646,14 @@ export default function OracleMonitor() {
     };
   }, [load]);
 
+  const oraclePayloadKey = `${network}:${hashVoteFrames}`;
   useEffect(() => {
-    if (view !== "oracle" || oraclePayloads[network]) return;
+    if (view !== "oracle" || oraclePayloads[oraclePayloadKey]) return;
     const controller = new AbortController();
     const start = window.setTimeout(() => {
       setOracleLoading(true);
       setOracleError(null);
-      fetch(`/api/oracle-reports?network=${network}`, {
+      fetch(`/api/oracle-reports?network=${network}&frames=${hashVoteFrames}`, {
         signal: controller.signal,
       })
         .then(async (response) => {
@@ -1414,7 +1669,7 @@ export default function OracleMonitor() {
           }
           setOraclePayloads((current) => ({
             ...current,
-            [network]: payload,
+            [oraclePayloadKey]: payload,
           }));
         })
         .catch((loadError) => {
@@ -1437,7 +1692,7 @@ export default function OracleMonitor() {
       window.clearTimeout(start);
       controller.abort();
     };
-  }, [network, oraclePayloads, view]);
+  }, [hashVoteFrames, network, oraclePayloadKey, oraclePayloads, view]);
 
   const copied = useCallback(() => {
     setToast(true);
@@ -1553,43 +1808,80 @@ export default function OracleMonitor() {
     trackedBalances.filter((balance) => balance < LOW_BALANCE_ETH).length +
     missingTelemetryBalanceCount;
 
-  const filteredReports = useMemo(() => {
-    if (!data) return [];
+  // Messages that pass the search and the module, event and holder filters,
+  // with the number of found messages per option for the filter menus.
+  const telemetryFilter = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return data.messages.filter((message) => {
-      const matchesModule =
-        moduleFilter === "all" || message.module === moduleFilter;
-      const matchesQuery =
+    const found = (data?.messages ?? []).filter(
+      (message) =>
         !needle ||
         message.sender.includes(needle) ||
         (LABELS[message.memberAddress ?? message.holderAddress ?? message.sender] ?? "")
           .toLowerCase()
           .includes(needle) ||
         message.transactionHash.toLowerCase().includes(needle) ||
-        String(message.blockNumber).includes(needle);
-      return matchesModule && matchesQuery;
+        String(message.blockNumber).includes(needle),
+    );
+    return filterWithCounts(found, {
+      module: { selected: moduleFilter, valueOf: (message) => message.module },
+      event: { selected: eventFilter, valueOf: (message) => message.event },
+      holder: {
+        selected: telemetryHolderFilter,
+        valueOf: (message) => message.holderAddress,
+      },
     });
-  }, [data, moduleFilter, query]);
+  }, [data, eventFilter, moduleFilter, query, telemetryHolderFilter]);
+  const filteredReports = telemetryFilter.items;
 
   const visibleReport = selectedReport ?? filteredReports[0] ?? null;
-  const oraclePayload = oraclePayloads[network];
-  const filteredOracleReports = useMemo(
+  const oraclePayload = oraclePayloads[oraclePayloadKey];
+  const oracleFilter = useMemo(
     () =>
-      (oraclePayload?.reports ?? []).filter(
-        (report) =>
-          oracleModuleFilter === "all" ||
-          report.module === oracleModuleFilter,
-      ),
-    [oracleModuleFilter, oraclePayload],
+      filterWithCounts(oraclePayload?.reports ?? [], {
+        module: {
+          selected: oracleModuleFilter,
+          valueOf: (report) => report.module,
+        },
+        phase: {
+          selected: oraclePhaseFilter,
+          valueOf: (report) => report.phase,
+        },
+        holder: {
+          selected: oracleHolderFilter,
+          valueOf: (report) =>
+            holderContractFor(network, report.sender, holderByMember),
+        },
+      }),
+    [
+      holderByMember,
+      network,
+      oracleHolderFilter,
+      oracleModuleFilter,
+      oraclePayload,
+      oraclePhaseFilter,
+    ],
   );
+  const filteredOracleReports = oracleFilter.items;
   const visibleOracleReport =
     selectedOracleReport ?? filteredOracleReports[0] ?? null;
 
   const explorer = NETWORKS[network].explorer;
-  const moduleFilterKeys: Array<ModuleKey | "all"> = [
-    "all",
-    ...networkModules.map(({ key }) => key),
-  ];
+  const moduleOptions: FilterOption<ModuleKey>[] = networkModules.map(
+    ({ key, label, full }) => ({ value: key, label, title: full }),
+  );
+  const phaseOptions: FilterOption<ReportPhase>[] = REPORT_PHASES.map(
+    ({ key, label, full }) => ({ value: key, label, title: full }),
+  );
+  const eventOptions: FilterOption<TelemetryEvent>[] = TELEMETRY_EVENT_KINDS.map(
+    ({ key, label, full }) => ({ value: key, label, title: full }),
+  );
+  const holderOptions: FilterOption<string>[] = (data?.holders ?? []).map(
+    (holder) => ({
+      value: holder.contract,
+      label: holder.label,
+      title: holder.contract,
+    }),
+  );
 
   return (
     <main className="app-shell">
@@ -1637,11 +1929,13 @@ export default function OracleMonitor() {
             onClick={() => {
               void load();
               if (view === "oracle") {
-                setOraclePayloads((current) => {
-                  const next = { ...current };
-                  delete next[network];
-                  return next;
-                });
+                setOraclePayloads((current) =>
+                  Object.fromEntries(
+                    Object.entries(current).filter(
+                      ([key]) => !key.startsWith(`${network}:`),
+                    ),
+                  ),
+                );
               }
             }}
             disabled={loading || oracleLoading}
@@ -2044,22 +2338,37 @@ export default function OracleMonitor() {
               </div>
             </div>
 
-            <div className="report-controls">
-              <div className="module-filter" aria-label="Filter by module">
-                {moduleFilterKeys.map((key) => (
-                  <button
-                    type="button"
-                    key={key}
-                    className={moduleFilter === key ? "active" : ""}
-                    onClick={() => {
-                      setSelectedReport(null);
-                      navigate("telemetry", network, key);
-                    }}
-                  >
-                    {key === "all" ? "All modules" : moduleLabel(key)}
-                  </button>
-                ))}
-              </div>
+            <div className="filter-bar" role="group" aria-label="Filters">
+              <FilterMenu
+                label="Module"
+                options={moduleOptions}
+                selected={moduleFilter}
+                counts={telemetryFilter.counts.module}
+                onChange={(modules) => {
+                  setSelectedReport(null);
+                  navigate("telemetry", network, { modules });
+                }}
+              />
+              <FilterMenu
+                label="Event"
+                options={eventOptions}
+                selected={eventFilter}
+                counts={telemetryFilter.counts.event}
+                onChange={(events) => {
+                  setSelectedReport(null);
+                  navigate("telemetry", network, { events });
+                }}
+              />
+              <FilterMenu
+                label="Holder"
+                options={holderOptions}
+                selected={telemetryHolderFilter}
+                counts={telemetryFilter.counts.holder}
+                onChange={(telemetryHolders) => {
+                  setSelectedReport(null);
+                  navigate("telemetry", network, { telemetryHolders });
+                }}
+              />
               <label className="search-field">
                 <Search size={15} />
                 <input
@@ -2069,7 +2378,7 @@ export default function OracleMonitor() {
                     setQuery(nextQuery);
                     setSelectedReport(null);
                     router.replace(
-                      routeFor("telemetry", network, moduleFilter, nextQuery),
+                      routeFor("telemetry", network, { query: nextQuery }),
                       { scroll: false },
                     );
                   }}
@@ -2077,6 +2386,28 @@ export default function OracleMonitor() {
                   aria-label="Search reports"
                 />
               </label>
+              <button
+                type="button"
+                className="filter-reset"
+                disabled={
+                  !moduleFilter.length &&
+                  !eventFilter.length &&
+                  !telemetryHolderFilter.length &&
+                  !query
+                }
+                onClick={() => {
+                  setQuery("");
+                  setSelectedReport(null);
+                  navigate("telemetry", network, {
+                    modules: [],
+                    events: [],
+                    telemetryHolders: [],
+                    query: "",
+                  });
+                }}
+              >
+                Reset
+              </button>
             </div>
 
             <div className="reports-layout">
@@ -2102,6 +2433,9 @@ export default function OracleMonitor() {
                         <span className="ledger-block">
                           <strong>#{message.blockNumber.toLocaleString()}</strong>
                           <ModulePill module={message.module} />
+                          <span className="ledger-event">
+                            {eventLabel(message.event)}
+                          </span>
                         </span>
                         <span className="ledger-sender">
                           <strong>
@@ -2129,7 +2463,7 @@ export default function OracleMonitor() {
                     <div className="no-results">
                       <Search size={20} />
                       <strong>No reports match this filter</strong>
-                      <span>Try another module or search term.</span>
+                      <span>Try another filter or search term.</span>
                     </div>
                   )}
                   {filteredReports.length > 500 && (
@@ -2172,6 +2506,9 @@ export default function OracleMonitor() {
                       <div>
                         <span>Module</span>
                         <ModulePill module={visibleReport.module} />
+                        <span className="ledger-event">
+                          {eventLabel(visibleReport.event)}
+                        </span>
                       </div>
                       <div>
                         <span>Sender</span>
@@ -2216,17 +2553,18 @@ export default function OracleMonitor() {
             <div className="reports-heading">
               <div>
                 <div className="eyebrow">
-                  {NETWORKS[network].label} · receiver transactions
+                  {NETWORKS[network].label} · report transactions
                 </div>
                 <h1>Onchain oracle reports</h1>
                 <p>
-                  Decoded submitReportData calls received directly or through
-                  Execution Delegation Framework contracts.
+                  All report phases: hash votes in HashConsensus, decoded
+                  submitReportData calls and Accounting Oracle extra data, sent
+                  directly or through Execution Delegation Framework contracts.
                 </p>
               </div>
               <div className="reports-count">
                 <strong>{filteredOracleReports.length}</strong>
-                <span>decoded reports</span>
+                <span>decoded transactions</span>
               </div>
             </div>
 
@@ -2252,24 +2590,88 @@ export default function OracleMonitor() {
               </div>
             )}
 
-            <div className="report-controls">
-              <div className="module-filter" aria-label="Filter oracle reports">
-                {moduleFilterKeys.map((key) => (
-                  <button
-                    type="button"
-                    key={key}
-                    className={oracleModuleFilter === key ? "active" : ""}
-                    onClick={() => {
-                      setSelectedOracleReport(null);
-                      navigate("oracle", network, key);
-                    }}
-                  >
-                    {key === "all" ? "All modules" : moduleLabel(key)}
-                  </button>
-                ))}
-              </div>
-              <span className="range-chip">latest onchain activity</span>
+            <div className="filter-bar" role="group" aria-label="Filters">
+              <FilterMenu
+                label="Module"
+                options={moduleOptions}
+                selected={oracleModuleFilter}
+                counts={oracleFilter.counts.module}
+                onChange={(oracleModules) => {
+                  setSelectedOracleReport(null);
+                  navigate("oracle", network, { oracleModules });
+                }}
+              />
+              <FilterMenu
+                label="Phase"
+                options={phaseOptions}
+                selected={oraclePhaseFilter}
+                counts={oracleFilter.counts.phase}
+                onChange={(phases) => {
+                  setSelectedOracleReport(null);
+                  navigate("oracle", network, { phases });
+                }}
+              />
+              <FilterMenu
+                label="Holder"
+                options={holderOptions}
+                selected={oracleHolderFilter}
+                counts={oracleFilter.counts.holder}
+                onChange={(holders) => {
+                  setSelectedOracleReport(null);
+                  navigate("oracle", network, { holders });
+                }}
+              />
+              <span className="filter-divider" />
+              <Dropdown label="Hash votes" value={`${hashVoteFrames} frames`}>
+                {(close) =>
+                  HASH_VOTE_FRAMES.map((frames) => (
+                    <button
+                      type="button"
+                      key={frames}
+                      role="menuitemradio"
+                      aria-checked={hashVoteFrames === frames}
+                      title={`Load hash votes of the latest ${frames} frames per module, within about 35 days of history`}
+                      onClick={() => {
+                        close();
+                        setSelectedOracleReport(null);
+                        navigate("oracle", network, { frames });
+                      }}
+                    >
+                      <span className="filter-menu-box round">
+                        {hashVoteFrames === frames && <i />}
+                      </span>
+                      Latest {frames} frames
+                    </button>
+                  ))
+                }
+              </Dropdown>
+              <button
+                type="button"
+                className="filter-reset"
+                disabled={
+                  !oracleModuleFilter.length &&
+                  !oraclePhaseFilter.length &&
+                  !oracleHolderFilter.length
+                }
+                onClick={() => {
+                  setSelectedOracleReport(null);
+                  navigate("oracle", network, {
+                    oracleModules: [],
+                    phases: [],
+                    holders: [],
+                  });
+                }}
+              >
+                Reset
+              </button>
             </div>
+
+            {oraclePayload?.warnings?.map((warning) => (
+              <div className="report-warning" role="status" key={warning}>
+                <AlertTriangle size={14} />
+                {warning}
+              </div>
+            ))}
 
             {oracleLoading && !oraclePayload ? (
               <div className="loading-state report-loading" role="status">
@@ -2302,7 +2704,7 @@ export default function OracleMonitor() {
               <div className="reports-layout oracle-reports-layout">
                 <section className="report-ledger" aria-label="Oracle report ledger">
                   <header className="ledger-header">
-                    <span>Block / module</span>
+                    <span>Block / module / phase</span>
                     <span>Submitter</span>
                     <span>Age</span>
                   </header>
@@ -2317,10 +2719,10 @@ export default function OracleMonitor() {
                         return (
                           <button
                             type="button"
-                            key={report.transactionHash}
+                            key={reportKey(report)}
                             className={
-                              visibleOracleReport?.transactionHash ===
-                              report.transactionHash
+                              visibleOracleReport &&
+                              reportKey(visibleOracleReport) === reportKey(report)
                                 ? "active"
                                 : ""
                             }
@@ -2328,11 +2730,17 @@ export default function OracleMonitor() {
                           >
                             <span className="ledger-block">
                               <strong>#{report.blockNumber.toLocaleString()}</strong>
-                              <ModulePill module={report.module} />
+                              <span className="ledger-pills">
+                                <ModulePill module={report.module} />
+                                <PhasePill phase={report.phase} />
+                              </span>
                             </span>
                             <span className="ledger-sender">
                               <strong>
-                                {LABELS[report.sender] ?? "Authorized submitter"}
+                                {LABELS[report.sender] ??
+                                  (report.phase === "hash"
+                                    ? "Committee member"
+                                    : "Authorized submitter")}
                               </strong>
                               <small>slot {report.refSlot.toLocaleString()}</small>
                             </span>
@@ -2348,8 +2756,8 @@ export default function OracleMonitor() {
                         <ListTree size={20} />
                         <strong>No decoded reports in this filter</strong>
                         <span>
-                          The receiver may not have recent submitReportData
-                          activity.
+                          There may be no recent report activity for this
+                          module, phase and holder.
                         </span>
                       </div>
                     )}
@@ -2394,8 +2802,8 @@ export default function OracleMonitor() {
           <Clock3 size={13} /> Auto-refreshes every 5 minutes
         </span>
         <span>
-          Membership: HashConsensus · Telemetry: DataBus · Reports: receiver
-          calldata
+          Membership: HashConsensus · Telemetry: DataBus · Reports:
+          HashConsensus events and receiver calldata
         </span>
       </footer>
     </main>
