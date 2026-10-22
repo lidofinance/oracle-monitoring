@@ -629,6 +629,19 @@ p {
   color: #a55218;
 }
 
+.slot-cell.pending {
+  background: #f3f5f3;
+  border-color: #dce2dc;
+}
+
+.slot-cell.pending .slot-ok {
+  color: var(--muted);
+}
+
+.slot-cell.pending .slot-relative {
+  white-space: normal;
+}
+
 .slot-cell.overdue {
   background: var(--red-soft);
   border-color: #f2bbb5;

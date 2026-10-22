@@ -39,6 +39,7 @@ import {
 } from "react";
 
 import { CONSENSUS_CONTRACTS } from "./consensus-contracts";
+import { readConsensusFrame, voteStateFor, type FrameInfo } from "./oracle-consensus";
 import { filterWithCounts, parseSelection, toggleSelection } from "./filters";
 import {
   ORACLE_MODULES,
@@ -131,14 +132,6 @@ type BusMessage = {
 type ChainConfig = {
   secondsPerSlot: number;
   genesisTime: number;
-};
-
-// Current reporting frame of a HashConsensus: a member that voted for the
-// current or the previous reference slot is on time.
-type FrameInfo = {
-  refSlot: number;
-  previousRefSlot: number;
-  deadlineSlot: number;
 };
 
 type NetworkSnapshot = {
@@ -606,10 +599,10 @@ async function fetchMembers(
         MEMBER_ABI,
         provider,
       );
-      const [[addresses, slots], [refSlot, deadlineSlot], [, epochsPerFrame]] =
+      const [[addresses, slots], currentFrame, [, epochsPerFrame]] =
         await Promise.all([
           contract.getMembers(),
-          contract.getCurrentFrame(),
+          readConsensusFrame(() => contract.getCurrentFrame()),
           contract.getFrameConfig(),
         ]);
       return {
@@ -618,10 +611,10 @@ async function fetchMembers(
           address: address.toLowerCase(),
           slot: Number(slots[index]),
         })),
-        frame: {
-          refSlot: Number(refSlot),
+        frame: currentFrame === null ? null : {
+          refSlot: Number(currentFrame[0]),
           epochsPerFrame: Number(epochsPerFrame),
-          deadlineSlot: Number(deadlineSlot),
+          deadlineSlot: Number(currentFrame[1]),
         },
       };
     }),
@@ -689,7 +682,7 @@ async function fetchMembers(
     frames: Object.fromEntries(
       moduleResults.map(({ key, frame }) => [
         key,
-        {
+        frame === null ? { notStarted: true } : {
           refSlot: frame.refSlot,
           previousRefSlot:
             frame.refSlot - frame.epochsPerFrame * Number(slotsPerEpoch),
@@ -890,15 +883,6 @@ function formatDuration(seconds: number) {
   if (seconds % 3600 === 0) return plural(seconds / 3600, "hour");
   if (seconds % 60 === 0) return plural(seconds / 60, "min");
   return plural(seconds, "sec");
-}
-
-type VoteState = "current" | "previous" | "missed" | "unknown";
-
-function voteStateFor(slot: number | undefined, frame: FrameInfo | undefined): VoteState {
-  if (slot === undefined || !frame) return "unknown";
-  if (slot >= frame.refSlot) return "current";
-  if (slot >= frame.previousRefSlot) return "previous";
-  return "missed";
 }
 
 function AddressLink({
@@ -1885,6 +1869,7 @@ export default function OracleMonitor() {
       return (
         total +
         networkModules.filter(({ key }) => {
+          if (voteStateFor(member.lastSlots[key], data.frames[key]) === "not-started") return false;
           const message = modules?.get(key);
           return !message || message.ageSeconds > STALE_SECONDS;
         }).length
@@ -2371,7 +2356,9 @@ export default function OracleMonitor() {
                             // reported + telemetry, reported only, telemetry
                             // only, nothing.
                             const tone =
-                              vote === "unknown"
+                              vote === "not-started"
+                                ? "pending"
+                                : vote === "unknown"
                                 ? recent
                                   ? "recent"
                                   : "overdue"
@@ -2389,7 +2376,9 @@ export default function OracleMonitor() {
                                     ? slot
                                       ? `Not reported · last ref slot ${slot.toLocaleString()}`
                                       : "Not reported · never voted"
-                                    : "Not in this committee";
+                                    : vote === "not-started"
+                                      ? "Not started · initial epoch has not arrived"
+                                      : "Not in this committee";
                             const telemetryText = message
                               ? recent
                                 ? `Telemetry ${relativeTime(message.ageSeconds)} · #${message.blockNumber.toLocaleString()}`
@@ -2405,7 +2394,7 @@ export default function OracleMonitor() {
                                   className={`slot-cell ${tone}`}
                                   title={[
                                     voteText,
-                                    frame
+                                    frame && !("notStarted" in frame)
                                       ? `current frame ref slot ${frame.refSlot.toLocaleString()}`
                                       : "",
                                     telemetryText,
@@ -2415,12 +2404,16 @@ export default function OracleMonitor() {
                                     .join("\n")}
                                 >
                                   <span className="slot-ok">
-                                    {reported || (vote === "unknown" && recent) ? (
+                                    {vote === "not-started" ? (
+                                      <Clock3 size={15} />
+                                    ) : reported || (vote === "unknown" && recent) ? (
                                       <CheckCircle2 size={15} />
                                     ) : (
                                       <AlertTriangle size={15} />
                                     )}
-                                    {vote === "unknown"
+                                    {vote === "not-started"
+                                      ? "Not started"
+                                      : vote === "unknown"
                                       ? recent
                                         ? "Telemetry ok"
                                         : "Telemetry silent"
@@ -2429,7 +2422,9 @@ export default function OracleMonitor() {
                                         : "Not reported"}
                                   </span>
                                   <span className="slot-relative">
-                                    {vote === "unknown"
+                                    {vote === "not-started"
+                                      ? "Initial epoch has not arrived"
+                                      : vote === "unknown"
                                       ? telemetryText
                                       : voteText.replace(/^(Reported|Not reported) · /, "")}
                                   </span>
