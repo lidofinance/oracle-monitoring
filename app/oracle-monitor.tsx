@@ -25,6 +25,7 @@ import {
   RefreshCw,
   Search,
   ServerCog,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -2038,6 +2039,7 @@ export default function OracleMonitor() {
           >
             <ListTree size={16} /> Oracle reports
           </button>
+          <a className="council-nav-link" href="/council"><ShieldCheck size={16} /> Council</a>
         </nav>
         <div className="top-actions">
           <span className="updated">

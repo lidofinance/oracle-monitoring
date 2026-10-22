@@ -629,6 +629,20 @@ p {
   color: #a55218;
 }
 
+.view-tabs .council-nav-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px 12px;
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.view-tabs .council-nav-link:hover { color: var(--green); }
+
 .slot-cell.pending {
   background: #f3f5f3;
   border-color: #dce2dc;

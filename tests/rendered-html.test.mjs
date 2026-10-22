@@ -48,3 +48,15 @@ test("server-renders the depositor dashboard without claiming bot liveness", asy
   assert.match(html, /Depositor balance/);
   assert.doesNotMatch(html, /Bot is online|Bot is running/i);
 });
+
+
+test("server-renders the Council dashboard without inferring daemon process health", async () => {
+  const response = await render("/council");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /Lido Council Watch/);
+  assert.match(html, /Council daemons/);
+  assert.match(html, /Gnosis/);
+  assert.match(html, /Polygon/);
+  assert.doesNotMatch(html, /All daemons online|All daemons running/i);
+});

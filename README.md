@@ -175,3 +175,46 @@ See [SECURITY.md](SECURITY.md) for how to report vulnerabilities.
 ## License
 
 Distributed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
+
+## Council dashboard
+
+`/council` monitors the current Mainnet DSM Council. It discovers guardians
+through Lido Locator and resolves each active EDF delegate, owner and pending
+key. The balance cards show each delegate's native ETH, xDAI and POL balances
+on Ethereum, Gnosis and Polygon respectively, pinned to confirmed chain heads.
+The page links to the contracts and network-specific wallet histories.
+
+`/api/council` serves a one-minute cached membership/balance snapshot.
+`/api/council?section=activity` serves five-minute cached activity over seven
+UTC calendar days. DataBus records support legacy compact-signature messages and current EDF
+Deposit V2, Pause V4 and Unvet V2 messages, plus Ping V1, inside DataBus's
+anonymous bytes envelope. Event ranges are streamed and counted without
+retaining every high-volume deposit payload; the ledger keeps a bounded
+sample per message kind, with separate room for DSM calls. Complete DataBus
+checkpoints are reused for incremental scans during the same UTC window; a
+new day or a delegate rotation triggers a fresh scan. Known
+rotation keys and pre-EDF guardian keys are included and marked as other keys; current-key
+recency never falls back to a former-key heartbeat. Operator labels are
+sourced from the linked EDF governance migration, not used to determine
+membership. Messages are observed broadcasts, not verified signatures.
+RabbitMQ messages and daemon process health are outside this public view.
+
+DSM pause/deposit events are combined with Blockscout's direct and internal
+transaction index. Each candidate is checked against Ethereum RPC calldata
+and receipts. EDF execute calls are decoded only when their target is the
+current DSM. Successful unvet calls show operator IDs and target vetted
+counts; those counts are not a measurement of how many keys were removed.
+Reverted transactions are retained separately from successful-call totals.
+A successful pause call can be a no-op when the DSM is already paused.
+Unavailable providers, incomplete indexing and truncated coverage produce
+warnings and lower-bound totals. The ledger retains up to 500 broadcasts and 100 DSM calls;
+charts, totals and per-guardian counts use the full loaded window.
+
+Optional `GNOSIS_RPC_URLS` and `POLYGON_RPC_URLS` runtime variables accept
+comma-separated public or private RPC URLs. Ethereum uses `MAINNET_RPC_URLS`.
+No API keys are required by the default endpoints.
+
+The `/council` page runs in the root-path monitor runtime (port 3012). Include
+`deployment/council-routes.nginx.conf` as
+`/etc/nginx/snippets/council-routes.conf` in the website's TLS server block;
+it reuses the existing depositor proxy snippet and `/assets/` route.
