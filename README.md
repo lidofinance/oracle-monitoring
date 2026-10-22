@@ -50,7 +50,9 @@ than the outer transaction value. Both direct DSM calls and top-ups through
 EDF are discovered from successful contract events. Failed transactions
 emit no events and must be checked in the linked full wallet history.
 Missing RPC ranges produce explicit warnings. Buffer charts read historical
-contract state; they are not accumulated from browser visits. Withdrawal demand
+contract state once per UTC day over seven calendar days: completed days use
+the last block before midnight and today uses the latest confirmed block.
+Missing daily readings remain gaps; data is not accumulated from browser visits. Withdrawal demand
 is the queue’s unfinalized stETH, displayed in stETH alongside buffer ETH.
 Daily withdrawal fulfillment uses `WithdrawalsFinalized`: the inclusive request
 ID range counts requests, and `amountOfETHLocked` records ETH made claimable.

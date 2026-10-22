@@ -81,7 +81,7 @@ export type DepositorSnapshot = {
   wallets: DepositorWallet[];
   lastDeposit: { block: number; timestamp: number } | null;
   lastTopup: number | null;
-  history: { timestamp: number; buffer: string; depositable: string; withdrawalDemand: string | null }[];
+  history: { timestamp: number; blockTimestamp: number | null; buffer: string | null; depositable: string | null; withdrawalDemand: string | null }[];
   withdrawals: WithdrawalFinalization[];
   withdrawalsComplete: boolean;
   veboRequests: VeboExitRequest[];

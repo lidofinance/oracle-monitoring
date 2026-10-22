@@ -31,37 +31,43 @@ function Gate({ label, good }: { label: string; good: boolean | null }) {
 function BufferChart({ points }: { points: DepositorSnapshot["history"] }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const tooltipId = useId();
-  if (points.length < 2) return <div className="dep-empty">Historical state is currently unavailable.</div>;
+  if (!points.some((point) => point.buffer !== null)) return <div className="dep-empty">Historical state is currently unavailable.</div>;
   const width = 740, height = 200, left = 64, right = 16, bottom = 25, top = 12;
   const max = Math.max(...points.flatMap((point) => [Number(point.buffer), Number(point.depositable), Number(point.withdrawalDemand ?? 0)]), 1) * 1.08;
-  const start = points[0].timestamp, end = points[points.length - 1].timestamp;
-  const x = (timestamp: number) => left + (timestamp - start) / Math.max(1, end - start) * (width - left - right);
+  const day = (timestamp: number) => Math.floor(timestamp / 86400) * 86400;
+  const start = day(points[0].timestamp), end = day(points[points.length - 1].timestamp);
+  const x = (timestamp: number) => left + (day(timestamp) - start) / Math.max(1, end - start) * (width - left - right);
   const y = (value: string | number) => height - bottom - Number(value) / max * (height - bottom - top);
-  const path = (key: "buffer" | "depositable" | "withdrawalDemand") => {
+  const path = (key: "buffer" | "depositable" | "withdrawalDemand", fill = false) => {
     let connected = false;
-    return points.map((point) => {
-      if (point[key] === null) { connected = false; return ""; }
+    let firstX = 0, lastX = 0;
+    const close = () => fill && connected ? ` L ${lastX} ${y(0)} L ${firstX} ${y(0)} Z` : "";
+    let result = "";
+    for (const point of points) {
+      if (point[key] === null) { result += close(); connected = false; continue; }
       const command = connected ? "L" : "M";
+      if (!connected) firstX = x(point.timestamp);
+      lastX = x(point.timestamp);
       connected = true;
-      return `${command} ${x(point.timestamp)} ${y(point[key])}`;
-    }).join(" ");
+      result += ` ${command} ${lastX} ${y(point[key])}`;
+    }
+    return result + close();
   };
   const inspect = (event: { currentTarget: SVGSVGElement; clientX: number; clientY: number }) => {
         const matrix = event.currentTarget.getScreenCTM();
         if (!matrix) return;
         const cursor = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse());
         if (cursor.x < left || cursor.x > width - right || cursor.y < top || cursor.y > height - bottom) { setActiveIndex(null); return; }
-        const timestamp = start + (cursor.x - left) / (width - left - right) * (end - start);
         let nearest = 0;
         for (let index = 1; index < points.length; index++) {
-          if (Math.abs(points[index].timestamp - timestamp) < Math.abs(points[nearest].timestamp - timestamp)) nearest = index;
+          if (Math.abs(x(points[index].timestamp) - cursor.x) < Math.abs(x(points[nearest].timestamp) - cursor.x)) nearest = index;
         }
         setActiveIndex(nearest);
   };
   const selected = activeIndex === null ? null : points[Math.min(activeIndex, points.length - 1)];
   return <div className="dep-buffer-interactive">
     <svg className="dep-buffer-chart" viewBox={`0 0 ${width} ${height}`} role="group" tabIndex={0}
-      aria-label="Buffer ETH, depositable ETH and withdrawal demand. Hover, tap or use the arrow keys to inspect amounts rounded to whole ETH or stETH."
+      aria-label="Daily buffer ETH, depositable ETH and withdrawal demand over seven UTC days. Hover, tap or use the arrow keys to inspect amounts rounded to whole ETH or stETH."
       aria-describedby={selected ? tooltipId : undefined}
       onPointerMove={inspect}
       onClick={inspect}
@@ -79,22 +85,23 @@ function BufferChart({ points }: { points: DepositorSnapshot["history"] }) {
     >
     <defs><linearGradient id="dep-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stopColor="#147d5b" stopOpacity=".16" /><stop offset="100%" stopColor="#147d5b" stopOpacity=".01" /></linearGradient></defs>
     {[0, 0.5, 1].map((fraction) => <g key={fraction}><line x1={left} x2={width - right} y1={y(max * fraction)} y2={y(max * fraction)} stroke="#e6ebe6" strokeDasharray="3 4" /><text x={left - 10} y={y(max * fraction) + 3} textAnchor="end">{number(max * fraction, 0)}</text></g>)}
-    <path d={`${path("buffer")} L ${x(end)} ${y(0)} L ${x(start)} ${y(0)} Z`} fill="url(#dep-fill)" />
+    <path d={path("buffer", true)} fill="url(#dep-fill)" />
     <path d={path("buffer")} fill="none" stroke="#9ba9a0" strokeWidth="2" />
     <path d={path("depositable")} fill="none" stroke="#147d5b" strokeWidth="2.5" />
     <path d={path("withdrawalDemand")} fill="none" stroke="#c47732" strokeWidth="2.5" strokeDasharray="6 3" />
     {points.map((point) => <g key={point.timestamp}>
-      <circle cx={x(point.timestamp)} cy={y(point.depositable)} r="3" fill="#147d5b" />
+      {point.buffer !== null && <circle cx={x(point.timestamp)} cy={y(point.buffer)} r="3" fill="#9ba9a0" />}
+      {point.depositable !== null && <circle cx={x(point.timestamp)} cy={y(point.depositable)} r="3" fill="#147d5b" />}
       {point.withdrawalDemand !== null && <circle cx={x(point.timestamp)} cy={y(point.withdrawalDemand)} r="3" fill="#c47732" />}
     </g>)}
-    {[start, start + (end - start) / 2, end].map((timestamp, i) => <text key={timestamp} x={x(timestamp)} y={height - 5} textAnchor={i === 0 ? "start" : i === 2 ? "end" : "middle"}>{new Date(timestamp * 1000).toISOString().slice(11, 16)} UTC</text>)}
+    {points.map((point, i) => <text key={point.timestamp} x={x(point.timestamp)} y={height - 5} textAnchor={i === 0 ? "start" : i === points.length - 1 ? "end" : "middle"}>{new Date(point.timestamp * 1000).toISOString().slice(5, 10)}</text>)}
     {selected && <g className="dep-chart-selection" pointerEvents="none">
       <line x1={x(selected.timestamp)} x2={x(selected.timestamp)} y1={top} y2={height - bottom} stroke="#69756f" strokeDasharray="3 3" />
       {(["buffer", "depositable", "withdrawalDemand"] as const).map((key) => selected[key] === null ? null : <circle key={key} cx={x(selected.timestamp)} cy={y(selected[key])} r="4" fill={key === "buffer" ? "#9ba9a0" : key === "depositable" ? "#147d5b" : "#c47732"} stroke="white" strokeWidth="1.5" />)}
     </g>}
     </svg>
     {selected && <div id={tooltipId} className="dep-chart-tooltip" role="tooltip" style={{ left: `clamp(8px, calc(${x(selected.timestamp) / width * 100}% - 170px), calc(100% - 348px))` }}>
-      <time dateTime={new Date(selected.timestamp * 1000).toISOString()}>{date(selected.timestamp)}</time>
+      <time dateTime={new Date(selected.timestamp * 1000).toISOString()}>{new Date(selected.timestamp * 1000).toISOString().slice(0, 10)} · {day(selected.timestamp) === end ? "Latest" : "Day close"} (UTC)</time>
       {([
         ["buffer", "Buffer", "ETH"],
         ["depositable", "Depositable", "ETH"],
@@ -162,7 +169,7 @@ export default function DepositorMonitor() {
     const active = new AbortController(); controller.current = active;
     setLoading(true);
     try {
-      const response = await fetch(`/api/depositor?network=${network}&v=vebo`, { signal: active.signal });
+      const response = await fetch(`/api/depositor?network=${network}&v=daily-buffer`, { signal: active.signal });
       const snapshot = await response.json() as DepositorSnapshot & { error?: string };
       if (!response.ok) throw new Error(snapshot.error ?? "Could not load Ethereum data.");
       if (!active.signal.aborted) { setData(snapshot); setError(null); setNow(Math.floor(Date.now() / 1000)); }
@@ -212,7 +219,7 @@ export default function DepositorMonitor() {
           <section className="panel dep-operation"><header><ArrowUpRight size={16} /><h2>Top-up activity</h2><span className={`dep-pill ${data.gates.topupPaused ? "bad" : data.lastTopup && now - data.lastTopup < 86400 ? "good" : "neutral"}`}>{data.gates.topupPaused ? "Gateway paused" : data.lastTopup && now - data.lastTopup < 86400 ? "Recent top-up" : "No recent top-up"}</span></header><strong>{ago(data.lastTopup, now)}</strong><p>Last successful operation recorded by TopUpGateway{data.lastTopup ? ` · ${date(data.lastTopup)}` : ""}.</p><div className="dep-gates"><Gate label="Gateway unpaused" good={data.gates.topupPaused === null ? null : !data.gates.topupPaused} /><Gate label="Block distance passed" good={data.gates.topupDistancePassed} /></div></section>
         </div>
         <p className="dep-context-note"><Clock3 size={13} />{available === 0 ? "No depositable ETH is currently available. " : `${number(available)} ETH is available before module allocation and guardian checks. `}Activity confirms successful onchain operations; it does not prove a bot process is online. Top-ups also need eligible validators.</p>
-        <div className="dep-charts"><section className="panel"><header className="panel-header"><div><h2>Buffer over time</h2><p>Historical contract reads · approximately 24 hours · ETH / stETH</p></div><div className="dep-legend"><span><i className="buffer" />Buffer</span><span><i />Depositable</span><span><i className="withdrawal" />Withdrawal demand (stETH)</span></div></header><div className="dep-chart-wrap"><BufferChart points={data.history} /></div><div className="dep-buffer-split"><div><span>Depositable share of buffer</span><strong>{buffer > 0 ? `${number(available / buffer * 100, 1)}%` : "—"}</strong></div><div className="dep-progress"><i style={{ width: `${buffer > 0 ? Math.min(100, available / buffer * 100) : 0}%` }} /></div><small>{number(Math.max(0, buffer - available))} ETH in the buffer is unavailable for deposits under the current contract rules.</small></div></section>
+        <div className="dep-charts"><section className="panel"><header className="panel-header"><div><h2>Buffer over time</h2><p>Daily closes · seven UTC days · today latest · ETH / stETH</p></div><div className="dep-legend"><span><i className="buffer" />Buffer</span><span><i />Depositable</span><span><i className="withdrawal" />Withdrawal demand (stETH)</span></div></header><div className="dep-chart-wrap"><BufferChart points={data.history} /></div><div className="dep-buffer-split"><div><span>Depositable share of buffer</span><strong>{buffer > 0 ? `${number(available / buffer * 100, 1)}%` : "—"}</strong></div><div className="dep-progress"><i style={{ width: `${buffer > 0 ? Math.min(100, available / buffer * 100) : 0}%` }} /></div><small>{number(Math.max(0, buffer - available))} ETH in the buffer is unavailable for deposits under the current contract rules.</small></div></section>
         <section className="panel"><header className="panel-header"><div><h2>Daily ETH moved</h2><p>Seven UTC calendar days · ETH · fulfilled = finalized</p></div><div className="dep-legend"><span><i />Deposits</span><span><i className="topup" />Top-ups</span><span><i className="withdrawal" />Withdrawals fulfilled</span><span><i className="vebo" />VEBO exits requested (nominal)</span></div></header><ActivityChart transactions={transactions} withdrawals={withdrawalEvents} complete={data.withdrawalsComplete} veboDays={veboDays} veboComplete={data.veboComplete} now={now} /><div className="dep-volume-summary"><span><strong>{number(volume, 0)}</strong> ETH deposited / topped up</span><span><strong>{data.withdrawalsComplete ? "" : "≥"}{number(fulfilledEther, 0)}</strong> ETH withdrawals fulfilled<small>{data.withdrawalsComplete ? "" : "≥"}{number(fulfilledRequests, 0)} requests</small></span><span><strong>{data.veboComplete ? "" : "≥"}{number(veboRequestedEth, 0)}</strong> nominal ETH requested to exit<small>{data.veboComplete ? "" : "≥"}{number(veboRequestCount, 0)} VEBO requests</small></span><span><strong>{number(gas, 5)}</strong> ETH bot gas spent</span></div><p className="dep-vebo-note">VEBO demand is shown beside completed movements: {NOMINAL_EXIT_ETH} ETH × requested validators (nominal). Actual validator balances may differ. <a href={`${data.explorer}/address/${data.addresses.vebo}#events`} target="_blank" rel="noreferrer">VEBO events <ExternalLink size={11} /></a></p></section></div>
         <section className="panel dep-withdrawal-queue" aria-label="Withdrawal queue information">
           <header className="panel-header"><div><h2>Withdrawal queue</h2><p>Pending stETH demand and ETH ready to claim</p></div><Address value={data.addresses.withdrawalQueue} explorer={data.explorer} /></header>

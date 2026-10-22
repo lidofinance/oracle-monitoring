@@ -6,6 +6,7 @@ import {
   type DepositorSnapshot, type DepositorTransaction, type DepositorWallet,
 } from "../../depositor-data";
 import { serverRpcs } from "../../rpc-config";
+import { dailySnapshotTimes, blockAtOrBefore } from "../../depositor-history";
 
 type Network = "mainnet" | "hoodi";
 type Block = { number: string; timestamp: string };
@@ -140,24 +141,32 @@ async function loadDetails(chain: Chain, block: number, addresses: DepositorSnap
       } satisfies DepositorTransaction;
     } catch { warnings.push("Some transaction details could not be loaded."); return null; }
   })).filter((tx): tx is DepositorTransaction => tx !== null);
-  // Sample actual historical state, using each sample's block timestamp. Missing
-  // archive state creates a gap instead of a fabricated zero or interpolated value.
-  const history = (await mapLimit(Array.from({ length: 13 }, (_, i) => Math.max(0, block - (12 - i) * 600)), 2, async (sample) => {
+  const [start, end] = await Promise.all([chain.block(from), chain.block(block)]);
+  const timed = (value: Block) => ({ number: num(value.number), timestamp: num(value.timestamp) });
+  const blocks = new Map<number, Promise<Block>>([[from, Promise.resolve(start)], [block, Promise.resolve(end)]]);
+  const readBlock = (number: number) => {
+    let pending = blocks.get(number);
+    if (!pending) { pending = chain.block(number).catch((error) => { blocks.delete(number); throw error; }); blocks.set(number, pending); }
+    return pending;
+  };
+  // One closing snapshot per UTC day, plus today's confirmed state. Locate the
+  // actual block by timestamp so missed slots cannot move a point into another day.
+  const history = await mapLimit(dailySnapshotTimes(num(end.timestamp)), 2, async (timestamp) => {
     for (let attempt = 0; attempt < 2; attempt++) {
     try {
+      const sample = await blockAtOrBefore(timestamp, timed(start), timed(end), async (number) => timed(await readBlock(number)));
       const [mined, buffer, depositable, demand] = await Promise.all([
-        chain.block(sample),
+        readBlock(sample),
         chain.call(addresses.lido, LIDO_ABI, "getBufferedEther", [], sample),
         chain.call(addresses.lido, LIDO_ABI, "getDepositableEther", [], sample),
         optional<bigint>(() => chain.call(addresses.withdrawalQueue, WITHDRAWAL_ABI, "unfinalizedStETH", [], sample)),
       ]);
-      return { timestamp: num(mined.timestamp), buffer: ethAmount(String(buffer)), depositable: ethAmount(String(depositable)), withdrawalDemand: demand === null ? null : ethAmount(String(demand)) };
+      return { timestamp, blockTimestamp: num(mined.timestamp), buffer: ethAmount(String(buffer)), depositable: ethAmount(String(depositable)), withdrawalDemand: demand === null ? null : ethAmount(String(demand)) };
     } catch { if (attempt === 1) warnings.push("Some historical buffer samples are unavailable."); }
     }
-    return null;
-  })).filter((point): point is NonNullable<typeof point> => point !== null);
+    return { timestamp, blockTimestamp: null, buffer: null, depositable: null, withdrawalDemand: null };
+  });
   if (history.some((point) => point.withdrawalDemand === null)) warnings.push("Some historical withdrawal demand samples are unavailable.");
-  const start = await chain.block(from);
   return { history, transactions, withdrawals, withdrawalsComplete, veboRequests, veboComplete, activityFrom: num(start.timestamp), activityTo: block, activityTruncated: ordered.length > limit, warnings: [...new Set(warnings)] };
 }
 

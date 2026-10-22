@@ -4,6 +4,7 @@ import { LIDO_ABI, WITHDRAWAL_ABI, VEBO_ABI, unbufferedAmount, ethAmount, parseF
 
 import { displayEth } from '../app/depositor-format.ts';
 import { nominalVeboDays } from '../app/depositor-vebo.ts';
+import { dailySnapshotTimes, blockAtOrBefore } from '../app/depositor-history.ts';
 
 const lido = '0x0000000000000000000000000000000000000001';
 function unbuffered(address, amount) {
@@ -66,4 +67,24 @@ test('nominal VEBO demand groups publications by UTC day and counts repeated req
 test('no VEBO events produce seven zero-valued nominal demand days', () => {
   const days = nominalVeboDays([], Date.UTC(2026, 9, 21, 12) / 1000);
   assert.ok(days.every(day => day.requests === 0 && day.eth === 0));
+});
+
+test('daily buffer snapshots use six UTC day closes and the current confirmed time', () => {
+  const midnight = Date.UTC(2026, 9, 22) / 1000;
+  const snapshots = dailySnapshotTimes(midnight + 3600);
+  assert.equal(snapshots.length, 7);
+  assert.equal(snapshots[0], midnight - 5 * 86400 - 1);
+  assert.equal(snapshots[5], midnight - 1);
+  assert.equal(snapshots[6], midnight + 3600);
+  assert.equal(dailySnapshotTimes(midnight)[6], midnight);
+});
+
+test('daily block selection finds the last block before a cutoff despite missed slots', async () => {
+  const timestamps = [0, 12, 24, 60, 72, 84, 120, 132];
+  const blocks = timestamps.map((timestamp, number) => ({ number, timestamp }));
+  for (const target of [0, 1, 23, 24, 25, 59, 60, 119, 120, 131, 132]) {
+    const actual = await blockAtOrBefore(target, blocks[0], blocks.at(-1), async number => blocks[number]);
+    assert.equal(actual, timestamps.findLastIndex(timestamp => timestamp <= target));
+  }
+  await assert.rejects(blockAtOrBefore(-1, blocks[0], blocks.at(-1), async number => blocks[number]));
 });
