@@ -224,3 +224,68 @@ The `/council` page runs in the root-path monitor runtime (port 3012). Include
 `deployment/council-routes.nginx.conf` as
 `/etc/nginx/snippets/council-routes.conf` in the website's TLS server block;
 it reuses the existing depositor proxy snippet and `/assets/` route.
+
+### VEBO exit simulator
+
+`/vebo-simulator?network=mainnet|hoodi` provides a local scenario engine with
+editable withdrawal funding, report count and ETH limits, module exit-share
+thresholds, node-operator weights and forced/soft target counts. Select a chart
+bar to inspect a report, then a queue row to compare the winning operator to
+the runner-up at that exact selection step. The first differing predicate is
+highlighted. Selection is recalculated after each exit, including connected
+MetaRegistry stake changes. Forced continuation compares only forced excess
+and validator index. The report's encoded ordering is distinct from selection
+ordering. The inspected Oracle's hardcoded request cap is 500; users can
+explicitly explore a hypothetical higher cap.
+
+The simulator uses individual predictable principal and 32/2048 ETH effective
+balance caps independently. Both request-count and ETH limits stop selection;
+a candidate that exceeds the ETH budget is not skipped. Exits selected in earlier
+simulated reports cannot be selected again and count as committed principal.
+Future demand, rewards, deposit locks and timing of incoming principal are
+explicit scenario assumptions. The browser runs simulations in a cancellable
+Web Worker. JSON import/export preserves validator pools and operator groups;
+imported metadata is never shown as verified live data.
+
+`GET /api/vebo-simulator?network=mainnet&state=frame` starts or polls a snapshot
+job (202 while collecting, 200 when ready, 503 on incomplete data). It resolves
+the current VEBO reference frame and pins contract calls, Keys API mappings,
+Beacon balances, pending deposits/consolidations and recent exit requests to
+that reference state. It checks chain identity, EL/CL block hash agreement,
+each deposited key index, Lido withdrawal credentials and validator counts.
+Unregistered pending deposits require a valid Ethereum BLS POP deposit
+signature; registered top-ups and consolidation inflows are capped per validator.
+The snapshot includes current weights, target modes and MetaRegistry links.
+It never silently fills missing data with zeros.
+
+`state=finalized` explicitly selects a current finalized-state **scenario**, not
+the VEBO reference-slot report. Public Beacon APIs may serve current states but
+prune historical pending-state endpoints. Exact reference-state loading needs
+an archive Beacon API with the corresponding states. Configure comma-separated
+`MAINNET_BEACON_URLS` / `HOODI_BEACON_URLS` on the server if needed. Keys API
+bases default to `https://keys-api.lido.fi` and
+`https://keys-api-hoodi.testnet.fi`; override with `MAINNET_KEYS_API_URL` /
+`HOODI_KEYS_API_URL`. EL providers use the existing network RPC variables.
+Jobs are shared per network/state mode, cached for 15 minutes after completion,
+and failed jobs may retry after one minute. This collector requires the
+persistent Node runtime; an edge request lifecycle is not sufficient.
+
+The snapshot provides real selection inputs, **not** a complete reproduction
+of the Oracle's future churn/sweep/reward prediction service. Its incoming
+principal is an amount, without a predicted arrival epoch. Rewards and deposit
+lock start at zero and remain editable. Later reports assume unchanged chain
+conditions except the modeled demand growth and previously selected exits.
+
+Include `deployment/vebo-simulator-routes.nginx.conf` in the TLS server blocks
+that host the root-path runtime, beside the Council and Depositor includes.
+Completed snapshots are also stored in the ignored `.cache/vebo` directory
+(`VEBO_CACHE_DIR` overrides it), so restarts can reuse a snapshot within its
+15-minute lifetime. Cache writes are atomic and optional; a failed disk write
+does not invalidate the collected data. Pending deposit verification yields
+between small batches to keep the monitoring server responsive.
+
+Configured archive Beacon nodes take priority for reference-state requests;
+public providers remain fallbacks. Finalized scenarios and block/header reads
+prefer public providers, so an unavailable archive node does not disable the
+explicit finalized-scenario mode. Archive state reads allow up to three minutes
+for historical-state reconstruction. Beacon URLs are server-only settings.

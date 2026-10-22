@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { exampleScenario } from "../app/vebo-simulation.ts";
 
 async function render(path = "/") {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -68,4 +72,43 @@ test("Council rejects unknown networks before making any chain requests", async 
   const response = await render("/api/council?network=unknown");
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error, "Unknown Council network");
+});
+
+test("renders the VEBO simulator with explicit scenario assumptions", async () => {
+  const response = await render("/vebo-simulator");
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /VEBO Exit Simulator/);
+  assert.match(html, /Maximum exit requests/);
+  assert.match(html, /Sanity limit/);
+  assert.match(html, /fictional validator indexes/);
+  assert.match(html, /Operator weight/);
+  assert.doesNotMatch(html, /Guaranteed next report/);
+});
+test("VEBO simulator rejects unknown networks without collecting a snapshot", async () => {
+  const response = await render("/api/vebo-simulator?network=invalid");
+  assert.equal(response.status, 400);
+});
+
+test("VEBO cached snapshots remain isolated by network and state mode", async () => {
+  const directory=await fs.mkdtemp(path.join(os.tmpdir(),"vebo-cache-test-"));
+  const before=process.env.VEBO_CACHE_DIR;
+  process.env.VEBO_CACHE_DIR=directory;
+  try {
+    for(const network of ["mainnet","hoodi"]) {
+      const scenario=exampleScenario(network);scenario.demandETH=network==="mainnet"?111:222;
+      const data={scenario,meta:{network,reference:"finalized",source:"live"}};
+      await fs.writeFile(path.join(directory,`${network}-finalized.json`),JSON.stringify({finished:Date.now(),data}));
+    }
+    const responses=await Promise.all(["mainnet","hoodi"].map(network=>render(`/api/vebo-simulator?network=${network}&state=finalized`)));
+    for(const [i,response] of responses.entries()) {
+      assert.equal(response.status,200);const body=await response.json();
+      assert.equal(body.status,"ready");assert.equal(body.scenario.network,i===0?"mainnet":"hoodi");
+      assert.equal(body.scenario.demandETH,i===0?111:222);assert.equal(body.meta.reference,"finalized");
+    }
+    const invalid=await render("/api/vebo-simulator?state=head");assert.equal(invalid.status,400);
+  } finally {
+    if(before===undefined)delete process.env.VEBO_CACHE_DIR;else process.env.VEBO_CACHE_DIR=before;
+    await fs.rm(directory,{recursive:true,force:true});
+  }
 });

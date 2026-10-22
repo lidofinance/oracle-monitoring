@@ -171,3 +171,6 @@
 .dep-vebo-note svg { vertical-align: middle; }
 @media (max-width: 500px) { .dep-bar-pair { gap: 2px; } .dep-bar-column .dep-daily-exits { font-size: 8px; } }
 .dep-bar-column .dep-daily-exits { white-space: normal; text-align: center; }
+
+.dep-page-links {display:flex;align-items:center;gap:20px;}
+@media(max-width:800px) {.dep-page-links .dep-oracle-link {display:inline-flex;font-size:10px;}.dep-page-links {gap:15px;}}

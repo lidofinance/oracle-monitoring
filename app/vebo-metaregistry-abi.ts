@@ -1,0 +1,3 @@
+// Minimal read-only ABI from lidofinance/lido-oracle assets.
+const abi = [{"type":"function","name":"getOperatorGroup","inputs":[{"name":"groupId","type":"uint256"}],"outputs":[{"name":"groupInfo","type":"tuple","components":[{"name":"name","type":"string"},{"name":"subNodeOperators","type":"tuple[]","components":[{"name":"nodeOperatorId","type":"uint64"},{"name":"share","type":"uint16"}]},{"name":"externalOperators","type":"tuple[]","components":[{"name":"data","type":"bytes"}]}]}],"stateMutability":"view"},{"type":"function","name":"getOperatorGroupsCount","inputs":[],"outputs":[{"name":"count","type":"uint256"}],"stateMutability":"view"}];
+export default abi;
