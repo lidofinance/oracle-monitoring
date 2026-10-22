@@ -1,0 +1,21 @@
+[Unit]
+Description=Lido Depositor Onchain Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=raman
+WorkingDirectory=/opt/depositor-monitor
+ExecStart=/usr/bin/node /opt/depositor-monitor/node_modules/vinext/dist/cli.js start --hostname 127.0.0.1 --port 3012
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+# This host's outbound TCP connection setup exceeds Node's default 250ms
+# address-family attempt window. Use its working IPv4 route directly.
+Environment="NODE_OPTIONS=--dns-result-order=ipv4first --no-network-family-autoselection"
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

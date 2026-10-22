@@ -30,6 +30,50 @@ Tracked modules: Accounting Oracle (AO), Validator Exit Bus Oracle (VEBO),
 CSM fee oracle (CSM), CSM 0x02 fee oracle (CSM 0x02, Hoodi only for now) and
 Curated Module fee oracle (CM).
 
+## Depositor dashboard
+
+`/depositor/` monitors Lido’s public onchain deposit and top-up activity on
+Mainnet and Hoodi. It shows depositable ETH, buffered and total pooled ETH,
+current gas wallet balances, EDF delegates/owners, pause gates, withdrawal
+queue demand and claimable ETH, historical buffer/demand samples and a searchable transaction ledger with Etherscan links.
+
+The API at `/api/depositor?network=mainnet` (or `hoodi`) resolves protocol
+contracts from the canonical Lido Locator and discovers every current
+`TOP_UP_ROLE` holder from the gateway. It reads each EDF delegate live, so
+key rotations do not require editing addresses. All balances and gates use
+one block two blocks behind the head. Snapshots are cached for one minute;
+activity and historical samples are cached for five minutes.
+
+Activity covers approximately seven days (50,400 blocks), with at most 120
+latest operations. ETH moved comes from Lido’s `Unbuffered` events rather
+than the outer transaction value. Both direct DSM calls and top-ups through
+EDF are discovered from successful contract events. Failed transactions
+emit no events and must be checked in the linked full wallet history.
+Missing RPC ranges produce explicit warnings. Buffer charts read historical
+contract state; they are not accumulated from browser visits. Withdrawal demand
+is the queue’s unfinalized stETH, displayed in stETH alongside buffer ETH.
+Daily withdrawal fulfillment uses `WithdrawalsFinalized`: the inclusive request
+ID range counts requests, and `amountOfETHLocked` records ETH made claimable.
+Finalization is distinct from an owner claiming ETH. Daily chart summaries use
+the same seven UTC calendar days as its bars. Chart ETH/stETH values, including
+hover details, are rounded to the nearest whole unit; source data and chart
+geometry retain their original precision.
+
+The daily chart also shows nominal VEBO exit demand as a separate bar: each
+published `ValidatorExitRequest` counts as 32 ETH, matching Oracle Watch’s
+nominal metric. This is explicitly labeled and is not a historical validator
+balance or completed withdrawal measurement; 0x02 validator balances can be
+larger. Requests are grouped by the event’s publication timestamp, including
+requests repeated on different days. The VEBO address is resolved through the
+Locator; failed log ranges are flagged as incomplete rather than shown as a
+confirmed zero.
+
+This dashboard does not access Lido’s bot hosts. Recent transactions prove
+completed operations; inactivity does not establish that a process is down.
+Deposits require available ETH, allocation, keys and guardian approval;
+top-ups also require eligible validators. Uses the same runtime RPC settings
+as the report API, without an Etherscan key or database.
+
 ## Quick start with Docker
 
 ```bash
