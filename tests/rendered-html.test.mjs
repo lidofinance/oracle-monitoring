@@ -56,7 +56,16 @@ test("server-renders the Council dashboard without inferring daemon process heal
   const html = await response.text();
   assert.match(html, /Lido Council Watch/);
   assert.match(html, /Council daemons/);
+  assert.match(html, /role="tablist" aria-label="Council network"/);
+  assert.match(html, /id="council-tab-mainnet"/);
+  assert.match(html, /id="council-tab-hoodi"/);
   assert.match(html, /Gnosis/);
   assert.match(html, /Polygon/);
   assert.doesNotMatch(html, /All daemons online|All daemons running/i);
+});
+
+test("Council rejects unknown networks before making any chain requests", async () => {
+  const response = await render("/api/council?network=unknown");
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error, "Unknown Council network");
 });

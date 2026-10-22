@@ -136,3 +136,10 @@
 .cw-context>span:first-child {color:#e8f1eb;}
 .cw-context small {color:#a7b9ae;}
 .cw-context .network-dot {display:inline-block;flex-shrink:0;}
+
+.cw-context .network-switch {display:flex;align-items:center;flex-shrink:0;}
+.cw-context .network-switch button {display:flex;align-items:center;font-size:12px;}
+.cw-context .network-switch button:focus-visible {outline:2px solid #b4d8c6;outline-offset:2px;}
+.cw-hoodi .cw-metrics {grid-template-columns:repeat(3,minmax(0,1fr));}
+@media(min-width:801px) {.cw-hoodi .cw-guardian,.cw-hoodi .cw-table-heading {grid-template-columns:minmax(240px,1.6fr) repeat(2,minmax(100px,.75fr)) minmax(155px,1fr);}}
+@media(max-width:800px) {.cw-context {gap:12px;}.cw-hoodi .cw-metrics {grid-template-columns:repeat(2,minmax(0,1fr));}.cw-hoodi .cw-security {grid-column:1/-1;}}

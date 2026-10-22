@@ -178,13 +178,18 @@ Distributed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
 
 ## Council dashboard
 
-`/council` monitors the current Mainnet DSM Council. It discovers guardians
+`/council` has Mainnet and Hoodi tabs, with shareable `?network=mainnet` and
+`?network=hoodi` URLs. Mainnet is the default. Each tab monitors its own DSM Council. It discovers guardians
 through Lido Locator and resolves each active EDF delegate, owner and pending
 key. The balance cards show each delegate's native ETH, xDAI and POL balances
-on Ethereum, Gnosis and Polygon respectively, pinned to confirmed chain heads.
+on Ethereum, Gnosis and Polygon respectively. Hoodi shows testnet ETH and
+Chiado xDAI funding, with the Hoodi DSM and the documented Chiado DataBus.
+Balances are pinned to confirmed chain heads.
 The page links to the contracts and network-specific wallet histories.
 
 `/api/council` serves a one-minute cached membership/balance snapshot.
+Both API sections accept `network=mainnet|hoodi`; caches and incremental
+checkpoints are isolated by network. Unsupported networks return HTTP 400.
 `/api/council?section=activity` serves five-minute cached activity over seven
 UTC calendar days. DataBus records support legacy compact-signature messages and current EDF
 Deposit V2, Pause V4 and Unvet V2 messages, plus Ping V1, inside DataBus's
@@ -200,7 +205,7 @@ membership. Messages are observed broadcasts, not verified signatures.
 RabbitMQ messages and daemon process health are outside this public view.
 
 DSM pause/deposit events are combined with Blockscout's direct and internal
-transaction index. Each candidate is checked against Ethereum RPC calldata
+transaction index. Each candidate is checked against the selected execution network's RPC calldata
 and receipts. EDF execute calls are decoded only when their target is the
 current DSM. Successful unvet calls show operator IDs and target vetted
 counts; those counts are not a measurement of how many keys were removed.
@@ -211,7 +216,8 @@ warnings and lower-bound totals. The ledger retains up to 500 broadcasts and 100
 charts, totals and per-guardian counts use the full loaded window.
 
 Optional `GNOSIS_RPC_URLS` and `POLYGON_RPC_URLS` runtime variables accept
-comma-separated public or private RPC URLs. Ethereum uses `MAINNET_RPC_URLS`.
+comma-separated public or private RPC URLs. Ethereum uses `MAINNET_RPC_URLS`, Hoodi uses `HOODI_RPC_URLS`, and
+Chiado accepts `CHIADO_RPC_URLS`.
 No API keys are required by the default endpoints.
 
 The `/council` page runs in the root-path monitor runtime (port 3012). Include

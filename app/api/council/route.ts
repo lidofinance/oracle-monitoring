@@ -2,13 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { Interface, formatEther } from "ethers";
 import {
   COUNCIL_BUS, COUNCIL_BUS_ABI, COUNCIL_CHAINS, COUNCIL_DSM, COUNCIL_EDF,
-  COUNCIL_LABELS, COUNCIL_LOCATOR, parseCouncilBus, decodeCouncilDsm, CouncilStatistics,
-  type CouncilChain, type CouncilKind, type CouncilLog, type CouncilGuardian, type CouncilSnapshot, type CouncilActivity, type CouncilEvent, type CouncilHead,
+  COUNCIL_NETWORKS, councilNetwork, parseCouncilBus, decodeCouncilDsm, CouncilStatistics,
+  type CouncilNetwork, type CouncilChain, type CouncilKind, type CouncilLog, type CouncilGuardian, type CouncilSnapshot, type CouncilActivity, type CouncilEvent, type CouncilHead,
 } from "../../council-data";
 import { serverRpcs, parseRpcList } from "../../rpc-config";
 import { blockAtOrBefore } from "../../depositor-history";
 
-const CHAINS = Object.keys(COUNCIL_CHAINS) as CouncilChain[];
 const hex = (n: number) => `0x${n.toString(16)}`;
 const integer = (value: string) => Number(BigInt(value));
 const ZERO = "0x0000000000000000000000000000000000000000";
@@ -16,7 +15,7 @@ const LOCATOR = new Interface(["function depositSecurityModule() view returns(ad
 type Block = { number: string; timestamp: string };
 type Tx = { to: string | null; from: string; input: string; blockNumber: string };
 type Receipt = { status: string; gasUsed: string; effectiveGasPrice: string; logs: CouncilLog[] };
-const endpointLists = (chain: CouncilChain): readonly string[] => chain === "ethereum" ? serverRpcs("mainnet") : chain === "gnosis"
+const endpointLists = (chain: CouncilChain): readonly string[] => chain === "ethereum" ? serverRpcs("mainnet") : chain === "hoodi" ? serverRpcs("hoodi") : chain === "chiado" ? parseRpcList(process.env.CHIADO_RPC_URLS, ["https://rpc.chiadochain.net", "https://gnosis-chiado-rpc.publicnode.com"]) : chain === "gnosis"
   ? parseRpcList(process.env.GNOSIS_RPC_URLS, ["https://rpc.gnosischain.com", "https://gnosis-rpc.publicnode.com"])
   : parseRpcList(process.env.POLYGON_RPC_URLS, ["https://polygon-bor-rpc.publicnode.com", "https://polygon.drpc.org"]);
 
@@ -79,14 +78,15 @@ class Chain {
   }
 }
 
-let summaryCache: { expires: number; promise: Promise<CouncilSnapshot> } | undefined;
-let activityCache: { expires: number; promise: Promise<CouncilActivity>; dsm: string; members: string } | undefined;
+const summaryCaches = new Map<CouncilNetwork, { expires: number; promise: Promise<CouncilSnapshot> }>();
+const activityCaches = new Map<CouncilNetwork, { expires: number; promise: Promise<CouncilActivity>; dsm: string; members: string }>();
 type RawMessage = { log: CouncilLog; event: CouncilEvent };
-let busHistoryCache: {
+const busHistoryCaches = new Map<CouncilNetwork, {
   key: string; stats: CouncilStatistics; heads: Partial<Record<CouncilChain, CouncilHead>>;
   recent: Record<string, RawMessage[]>; latestRaw: Map<string, RawMessage>;
-} | undefined;
-async function loadSnapshot(): Promise<CouncilSnapshot> {
+}>();
+async function loadSnapshot(network: CouncilNetwork): Promise<CouncilSnapshot> {
+  const config = COUNCIL_NETWORKS[network], CHAINS = config.balanceChains;
   const clients = Object.fromEntries(CHAINS.map(chain => [chain, new Chain(chain)])) as Record<CouncilChain, Chain>;
   const headList = await Promise.all(CHAINS.map(chain => optional(() => clients[chain].head())));
   const heads: CouncilSnapshot["heads"] = {};
@@ -96,9 +96,9 @@ async function loadSnapshot(): Promise<CouncilSnapshot> {
     if (head) { heads[chain] = head; if (head.timestamp < Date.now() / 1000 - 300) warnings.push(`${COUNCIL_CHAINS[chain].name} chain head is stale.`); }
     else warnings.push(`${COUNCIL_CHAINS[chain].name} balances are currently unavailable.`);
   });
-  const eth = clients.ethereum, head = heads.ethereum;
-  if (!head) throw new Error("Ethereum Council membership could not be read. Try Refresh.");
-  const dsm = String(await eth.call(COUNCIL_LOCATOR, LOCATOR, "depositSecurityModule", [], head.block));
+  const eth = clients[config.executionChain], head = heads[config.executionChain];
+  if (!head) throw new Error(`${config.name} Council membership could not be read. Try Refresh.`);
+  const dsm = String(await eth.call(config.locator, LOCATOR, "depositSecurityModule", [], head.block));
   const [addresses, quorum, paused, lastDepositBlock, validity, maxOperators] = await Promise.all([
     eth.call(dsm, COUNCIL_DSM, "getGuardians", [], head.block) as Promise<string[]>,
     eth.call(dsm, COUNCIL_DSM, "getGuardianQuorum", [], head.block),
@@ -130,25 +130,27 @@ async function loadSnapshot(): Promise<CouncilSnapshot> {
       if (balance === null && wallet && chainHead) warnings.push(`Some ${COUNCIL_CHAINS[chain].name} wallet balances are unavailable.`);
       return [chain, balance === null ? null : formatEther(BigInt(balance))];
     }))) as CouncilGuardian["balances"];
-    const label = COUNCIL_LABELS[address.toLowerCase()];
+    const label = config.labels[address.toLowerCase()];
     return { address: address.toLowerCase(), name: label?.name ?? `Guardian ${addresses.indexOf(address) + 1}`, wallet: wallet?.toLowerCase() ?? null, owner: owner?.toLowerCase() ?? null, terminated, pendingDelegate: pending && pending.address !== ZERO ? pending.address.toLowerCase() : null, pendingFrom: pending?.from ?? null, legacy: label?.legacy ?? null, balances };
   });
   const lastDeposit = lastDepositBlock && Number(lastDepositBlock) > 0 ? await optional(() => eth.block(Number(lastDepositBlock))) : null;
-  return { updatedAt: Math.floor(Date.now() / 1000), dsm, quorum: Number(quorum), paused: Boolean(paused), guardians, heads, lastDeposit, pauseValidityBlocks: validity === null ? null : Number(validity), maxOperatorsPerUnvet: maxOperators === null ? null : Number(maxOperators), warnings: [...new Set(warnings)] };
+  return { network, updatedAt: Math.floor(Date.now() / 1000), dsm, quorum: Number(quorum), paused: Boolean(paused), guardians, heads, lastDeposit, pauseValidityBlocks: validity === null ? null : Number(validity), maxOperatorsPerUnvet: maxOperators === null ? null : Number(maxOperators), warnings: [...new Set(warnings)] };
 }
-function snapshot() {
-  if (!summaryCache || summaryCache.expires < Date.now()) {
-    const promise = loadSnapshot(); summaryCache = { expires: Date.now() + 60_000, promise };
-    void promise.catch(() => { summaryCache = undefined; });
+function snapshot(network: CouncilNetwork) {
+  let cache = summaryCaches.get(network);
+  if (!cache || cache.expires < Date.now()) {
+    const promise = loadSnapshot(network); cache = { expires: Date.now() + 60_000, promise };
+    summaryCaches.set(network, cache);
+    void promise.catch(() => { if (summaryCaches.get(network)?.promise === promise) summaryCaches.delete(network); });
   }
-  return summaryCache.promise;
+  return cache.promise;
 }
 
 type IndexItem = { hash?: string; transaction_hash?: string; timestamp?: string; block_number?: number; type?: string; to?: { hash: string } };
-async function indexedDsmCalls(dsm: string, from: number, toBlock: number) {
+async function indexedDsmCalls(indexer: string, dsm: string, from: number, toBlock: number) {
   const hashes = new Set<string>(); let complete = true;
   for (const feed of ["transactions?filter=to", "internal-transactions"]) {
-    let url: string | null = `https://eth.blockscout.com/api/v2/addresses/${dsm}/${feed}`;
+    let url: string | null = `${indexer}/api/v2/addresses/${dsm}/${feed}`;
     for (let page = 0; url && page < 12; page++) {
       try {
         const response = await fetch(url, { signal: AbortSignal.timeout(12000), cache: "no-store" });
@@ -167,7 +169,7 @@ async function indexedDsmCalls(dsm: string, from: number, toBlock: number) {
         else {
           const params = new URLSearchParams(Object.entries(body.next_page_params).map(([k, v]) => [k, String(v)]));
           if (feed.startsWith("transactions")) params.set("filter", "to");
-          url = `https://eth.blockscout.com/api/v2/addresses/${dsm}/${feed.split("?")[0]}?${params}`;
+          url = `${indexer}/api/v2/addresses/${dsm}/${feed.split("?")[0]}?${params}`;
         }
       } catch { complete = false; url = null; }
       if (page === 11 && url) complete = false;
@@ -177,24 +179,25 @@ async function indexedDsmCalls(dsm: string, from: number, toBlock: number) {
 }
 
 async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
-  const now = Math.min(state.updatedAt, state.heads.ethereum!.timestamp);
+  const network = state.network, config = COUNCIL_NETWORKS[network], executionChain = config.executionChain;
+  const now = Math.min(state.updatedAt, state.heads[executionChain]!.timestamp);
   const from = Math.floor(now / 86400) * 86400 - 6 * 86400;
   const warnings: string[] = [];
-  const coverage: CouncilActivity["coverage"] = { ethereum: false, gnosis: false, polygon: false };
+  const coverage: CouncilActivity["coverage"] = {};
   const aliases = new Map<string, CouncilGuardian>();
   for (const guardian of state.guardians) {
     for (const address of [guardian.address, guardian.wallet, guardian.legacy]) if (address) aliases.set(address.toLowerCase(), guardian);
   }
-  const ethereum = new Chain("ethereum"), head = state.heads.ethereum!;
-  const first = await ethereum.startAt(from, head);
+  const execution = new Chain(executionChain), head = state.heads[executionChain]!;
+  const first = await execution.startAt(from, head);
   // Include keys effective at the start and nominations/revocations during
   // the window. These never qualify as current-key health observations.
   const historicalKeys = await Promise.all(state.guardians.map(async g => {
-    const key = await optional(() => ethereum.call(g.address, COUNCIL_EDF, "getDelegate", [], first) as Promise<string>);
+    const key = await optional(() => execution.call(g.address, COUNCIL_EDF, "getDelegate", [], first) as Promise<string>);
     if (key && key !== ZERO) aliases.set(key.toLowerCase(), g);
     return key;
   }));
-  const rotations = await ethereum.logs(state.guardians.map(g => g.address), [[COUNCIL_EDF.getEvent("DelegateNominated")!.topicHash, COUNCIL_EDF.getEvent("DelegateRevoked")!.topicHash]], first, head.block);
+  const rotations = await execution.logs(state.guardians.map(g => g.address), [[COUNCIL_EDF.getEvent("DelegateNominated")!.topicHash, COUNCIL_EDF.getEvent("DelegateRevoked")!.topicHash]], first, head.block);
   let aliasesComplete = rotations.complete && historicalKeys.every(key => key !== null);
   for (const log of rotations.records) {
     try {
@@ -204,7 +207,8 @@ async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
   }
   if (!aliasesComplete) warnings.push("Some delegate-rotation history is unavailable; historical message attribution may be incomplete.");
   const cacheKey = `${from}:${state.dsm}:${state.guardians.map(g => `${g.address}:${g.wallet}`).join(",")}`;
-  const previous = busHistoryCache?.key === cacheKey && now >= busHistoryCache.stats.to && (["gnosis", "polygon"] as const).every(chain => state.heads[chain] && busHistoryCache!.heads[chain] && state.heads[chain]!.block >= busHistoryCache!.heads[chain]!.block) ? busHistoryCache : undefined;
+  const busHistoryCache = busHistoryCaches.get(network);
+  const previous = busHistoryCache?.key === cacheKey && now >= busHistoryCache.stats.to && config.busChains.every(chain => state.heads[chain] && busHistoryCache!.heads[chain] && state.heads[chain]!.block >= busHistoryCache!.heads[chain]!.block) ? busHistoryCache : undefined;
   const scannedHeads = structuredClone(state.heads);
   const stats = new CouncilStatistics(state.guardians, now);
   if (previous) { Object.assign(stats, structuredClone(previous.stats)); stats.to = now; }
@@ -216,7 +220,7 @@ async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
   const recent: Record<string, RawMessage[]> = previous ? Object.fromEntries(Object.entries(previous.recent).map(([kind, records]) => [kind, [...records]])) : { deposit: [], ping: [], pause: [], unvet: [] };
   const latestRaw = new Map<string, RawMessage>(previous?.latestRaw);
   const limits: Record<string, number> = { deposit: 300, ping: 150, pause: 25, unvet: 25 };
-  await Promise.all((["gnosis", "polygon"] as const).map(async chain => {
+  await Promise.all(config.busChains.map(async chain => {
     const client = new Chain(chain), head = state.heads[chain];
     if (!head) { warnings.push(`${COUNCIL_CHAINS[chain].name} message history is unavailable.`); return; }
     try {
@@ -266,24 +270,25 @@ async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
   // Keep only a complete bus checkpoint. A failed tail is retried from the
   // previous complete head, without double-counting partially loaded ranges.
   // A new UTC window or delegate rotation automatically starts a fresh scan.
-  if (coverage.gnosis && coverage.polygon) busHistoryCache = { key: cacheKey, stats: Object.assign(new CouncilStatistics(state.guardians, now), structuredClone(stats)), heads: scannedHeads, recent, latestRaw };
+  if (config.busChains.every(chain => coverage[chain])) busHistoryCaches.set(network, { key: cacheKey, stats: Object.assign(new CouncilStatistics(state.guardians, now), structuredClone(stats)), heads: scannedHeads, recent, latestRaw });
   const dsmTopics = ["DepositsPaused", "DepositsUnpaused", "LastDepositBlockChanged"].map(name => COUNCIL_DSM.getEvent(name)!.topicHash);
   const [logs, index] = await Promise.all([
-    ethereum.logs(state.dsm, [dsmTopics], first, head.block),
-    indexedDsmCalls(state.dsm, from, head.block),
+    execution.logs(state.dsm, [dsmTopics], first, head.block),
+    indexedDsmCalls(config.indexer, state.dsm, from, head.block),
   ]);
-  coverage.ethereum = logs.complete;
+  // DSM coverage is tracked separately: the execution chain may also host a bus.
+  // dsmHistoryComplete below includes event, index and receipt verification.
   if (!logs.complete) warnings.push("Some DSM event ranges are unavailable; execution counts are lower bounds.");
   if (!index.complete) warnings.push("DSM transaction history is incomplete. Pauses and deposits also use contract events; unvet calls depend on the transaction index.");
   for (const log of logs.records) index.hashes.add(log.transactionHash);
   let detailsComplete = true;
   const executions = (await mapLimit([...index.hashes], 4, async hash => {
     try {
-      const tx = await ethereum.rpc<Tx>("eth_getTransactionByHash", [hash]);
+      const tx = await execution.rpc<Tx>("eth_getTransactionByHash", [hash]);
       const decoded = decodeCouncilDsm(tx, state.dsm);
       const knownLogs = logs.records.filter(log => log.transactionHash === hash);
       if (!decoded && !knownLogs.length) return null;
-      const [receipt, block] = await Promise.all([ethereum.rpc<Receipt>("eth_getTransactionReceipt", [hash]), ethereum.block(integer(tx.blockNumber))]);
+      const [receipt, block] = await Promise.all([execution.rpc<Receipt>("eth_getTransactionReceipt", [hash]), execution.block(integer(tx.blockNumber))]);
       if (block.block > head.block || block.timestamp < from) return null;
       const stateEvent = knownLogs.map(log => COUNCIL_DSM.parseLog(log)).find(event => event?.name === "DepositsPaused" || event?.name === "LastDepositBlockChanged" || event?.name === "DepositsUnpaused");
       const kind = decoded?.kind ?? (stateEvent?.name === "DepositsPaused" ? "pause" : stateEvent?.name === "DepositsUnpaused" ? "resume" : "deposit");
@@ -291,7 +296,7 @@ async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
       const guardian = rawGuardian ? aliases.get(rawGuardian)?.address ?? null : null;
       const attesters = (decoded?.guardians ?? []).map(address => aliases.get(address)?.address).filter((a): a is string => !!a);
       return {
-        id: `ethereum:${hash}:execution`, chain: "ethereum", stage: "execution", kind, hash,
+        id: `${executionChain}:${hash}:execution`, chain: executionChain, stage: "execution", kind, hash,
         block: block.block, timestamp: block.timestamp, sender: tx.from.toLowerCase(),
         guardian: kind === "deposit" ? null : guardian, guardians: [...new Set(attesters)], currentKey: false,
         moduleId: decoded?.moduleId ?? null, referenceBlock: decoded?.referenceBlock ?? null, version: null,
@@ -305,17 +310,21 @@ async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
   const retainedIds = new Set(Object.values(recent).flat().map(item => item.event.id));
   const retained = [...decodedMessages.values()].filter(event => retainedIds.has(event.id));
   const events = [...retained, ...executions.sort((a,b) => b.timestamp - a.timestamp).slice(0,100)].sort((a,b) => b.timestamp - a.timestamp || b.block - a.block);
-  return { ...stats.finish(events), updatedAt: Math.floor(Date.now() / 1000), coverage, dsmHistoryComplete: logs.complete && index.complete && detailsComplete, warnings: [...new Set(warnings)] };
+  return { network, ...stats.finish(events), updatedAt: Math.floor(Date.now() / 1000), coverage, dsmHistoryComplete: logs.complete && index.complete && detailsComplete, warnings: [...new Set(warnings)] };
 }
 
 export async function GET(request: NextRequest) {
+  const network = councilNetwork(request.nextUrl.searchParams.get("network"));
+  if (!network) return NextResponse.json({ error: "Unknown Council network" }, { status: 400 });
   try {
-    const state = await snapshot();
+    const state = await snapshot(network);
+    let activityCache = activityCaches.get(network);
     if (request.nextUrl.searchParams.get("section") !== "activity") return NextResponse.json(state, { headers: { "Cache-Control": "no-store" } });
     const members = state.guardians.map(g => `${g.address}:${g.wallet}`).join(",");
     if (!activityCache || activityCache.expires < Date.now() || activityCache.dsm !== state.dsm || activityCache.members !== members) {
       const promise = loadActivity(state); activityCache = { promise, expires: Date.now() + 300_000, dsm: state.dsm, members };
-      void promise.catch(() => { activityCache = undefined; });
+      activityCaches.set(network, activityCache);
+      void promise.catch(() => { if (activityCaches.get(network)?.promise === promise) activityCaches.delete(network); });
     }
     const data = await activityCache.promise;
     if (data.warnings.length) activityCache!.expires = Math.min(activityCache!.expires, Date.now() + 60_000);

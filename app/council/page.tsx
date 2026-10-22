@@ -3,6 +3,6 @@ import CouncilMonitor from "./monitor";
 
 export const metadata: Metadata = {
   title: { absolute: "Lido Council Watch" },
-  description: "Live DSM Council guardians, delegate balances on Ethereum, Gnosis and Polygon, and confirmed Council messages and transactions.",
+  description: "Mainnet and Hoodi DSM Council guardians, delegate balances, DataBus broadcasts, and confirmed Council transactions.",
 };
 export default function CouncilPage() { return <CouncilMonitor />; }

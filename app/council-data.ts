@@ -1,8 +1,11 @@
 import { AbiCoder, Interface, decodeBytes32String } from "ethers";
 
-export type CouncilChain = "ethereum" | "gnosis" | "polygon";
+export type CouncilNetwork = "mainnet" | "hoodi";
+export type CouncilChain = "ethereum" | "gnosis" | "polygon" | "hoodi" | "chiado";
 export type CouncilKind = "deposit" | "ping" | "pause" | "unvet" | "resume";
 export const COUNCIL_CHAINS = {
+  hoodi: { name: "Hoodi", chainId: 560048, symbol: "ETH", explorer: "https://hoodi.etherscan.io", seconds: 12 },
+  chiado: { name: "Chiado", chainId: 10200, symbol: "xDAI", explorer: "https://gnosis-chiado.blockscout.com", seconds: 5 },
   ethereum: { name: "Ethereum", chainId: 1, symbol: "ETH", explorer: "https://etherscan.io", seconds: 12 },
   gnosis: { name: "Gnosis", chainId: 100, symbol: "xDAI", explorer: "https://gnosis.blockscout.com", seconds: 5 },
   polygon: { name: "Polygon", chainId: 137, symbol: "POL", explorer: "https://polygonscan.com", seconds: 2 },
@@ -20,6 +23,25 @@ export const COUNCIL_LABELS: Record<string, { name: string; legacy: string }> = 
   ["0x031E597BcF680f1f2293b119b4b2B14096B15497", "Stakefish", "0x4B87F16B8d32cb5a859a4C48a88edB5adBe3498E"],
   ["0x6A22d74a816662078f2371A7138E7614874cd61d", "Stakely", "0x6d22aE126eB2c37F67a1391B37FF4f2863e61389"],
 ].map(([address, name, legacy]) => [address.toLowerCase(), { name, legacy: legacy.toLowerCase() }]));
+
+export const COUNCIL_HOODI_LABELS: typeof COUNCIL_LABELS = Object.fromEntries([
+  ["0x56a1B0b5074818D568D6608dc07353e81b4b53ec", "Lido dev team", "0x4E93C8c7B06F1CEEb03A8e13B0371b35F93d3257"],
+  ["0x89e1bEBAf6857312bCDc313B93F29aB9cA98000f", "P2P", "0x89C102120452AfdFb63f2D4231C5CE3e939f393b"],
+  ["0x901789EA029B3c7CEa47019d6Df3C5973212976D", "Staking Facilities", "0x1be2A219CBD0F18B825a4dDd580F7b3B33Bacb41"],
+  ["0xa66FDd65Cfc78964A62b5Ec50E5b0Afd0e52D610", "Blockscape", "0xEf302FFC6830FbC464cDFFA84Fa4d5699aA8f06A"],
+  ["0x4EEC6BEd8d5E45f0a6a99F067bC5F6370f2f7221", "Stakefish", "0xcc1fFeb60ee3A3Cb6711E5D191339b0aF263328C"],
+  ["0x03224cFc446F3166c83E875095e872DD1E098076", "Stakely", "0x8C4C15870d27c1194B6893F6B94DD0CE9C2c8ba2"],
+].map(([address, name, legacy]) => [address.toLowerCase(), { name, legacy: legacy.toLowerCase() }]));
+export const COUNCIL_NETWORKS: Record<CouncilNetwork, {
+  name: string; locator: string; executionChain: CouncilChain; balanceChains: CouncilChain[];
+  busChains: CouncilChain[]; indexer: string; labels: typeof COUNCIL_LABELS; reference: string;
+}> = {
+  mainnet: { name: "Mainnet", locator: COUNCIL_LOCATOR, executionChain: "ethereum", balanceChains: ["ethereum", "gnosis", "polygon"], busChains: ["gnosis", "polygon"], indexer: "https://eth.blockscout.com", labels: COUNCIL_LABELS, reference: COUNCIL_LABEL_SOURCE },
+  hoodi: { name: "Hoodi", locator: "0xe2EF9536DAAAEBFf5b1c130957AB3E80056b06D8", executionChain: "hoodi", balanceChains: ["hoodi", "chiado"], busChains: ["chiado"], indexer: "https://eth-hoodi.blockscout.com", labels: COUNCIL_HOODI_LABELS, reference: "https://docs.lido.fi/deployed-contracts/hoodi/" },
+};
+export function councilNetwork(value: string | null): CouncilNetwork | null {
+  return value === null || value === "mainnet" ? "mainnet" : value === "hoodi" ? "hoodi" : null;
+}
 
 export const COUNCIL_DSM = new Interface([
   "function getGuardians() view returns(address[])", "function getGuardianQuorum() view returns(uint256)",
@@ -59,19 +81,19 @@ export type CouncilEvent = {
 export type CouncilGuardian = {
   address: string; name: string; wallet: string | null; owner: string | null;
   terminated: boolean | null; pendingDelegate: string | null; pendingFrom: number | null;
-  legacy: string | null; balances: Record<CouncilChain, string | null>;
+  legacy: string | null; balances: Partial<Record<CouncilChain, string | null>>;
 };
 export type CouncilHead = { block: number; timestamp: number };
 export type CouncilSnapshot = {
-  updatedAt: number; dsm: string; quorum: number; paused: boolean; guardians: CouncilGuardian[];
+  network: CouncilNetwork; updatedAt: number; dsm: string; quorum: number; paused: boolean; guardians: CouncilGuardian[];
   heads: Partial<Record<CouncilChain, CouncilHead>>;
   lastDeposit: CouncilHead | null; pauseValidityBlocks: number | null; maxOperatorsPerUnvet: number | null;
   warnings: string[];
 };
 export type CouncilDaily = { timestamp: number; deposit: number; ping: number; pause: number; unvet: number; executions: number };
 export type CouncilActivity = {
-  updatedAt: number; from: number; to: number; events: CouncilEvent[]; total: number;
-  daily: CouncilDaily[]; coverage: Record<CouncilChain, boolean>; dsmHistoryComplete: boolean;
+  network: CouncilNetwork; updatedAt: number; from: number; to: number; events: CouncilEvent[]; total: number;
+  daily: CouncilDaily[]; coverage: Partial<Record<CouncilChain, boolean>>; dsmHistoryComplete: boolean;
   members: { guardian: string; messages: number; deposits: number; pings: number; daily: number[]; dailyPings: number[]; last: CouncilEvent | null; lastCurrent: CouncilEvent | null }[];
   totals: { messages: number; deposits: number; pings: number; pauseMessages: number; unvetMessages: number; pauses: number; unvets: number; depositsExecuted: number; failed: number };
   warnings: string[];

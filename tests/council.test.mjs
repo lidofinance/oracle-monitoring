@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AbiCoder, encodeBytes32String } from 'ethers';
-import { COUNCIL_BUS_ABI, COUNCIL_DSM, COUNCIL_EDF, parseCouncilBus, decodeCouncilDsm, summarizeCouncil, unpackCouncilBytes } from '../app/council-data.ts';
+import { COUNCIL_NETWORKS, COUNCIL_CHAINS, councilNetwork, COUNCIL_BUS_ABI, COUNCIL_DSM, COUNCIL_EDF, parseCouncilBus, decodeCouncilDsm, summarizeCouncil, unpackCouncilBytes } from '../app/council-data.ts';
 const guardian = '0x0000000000000000000000000000000000000001';
 const wallet = '0x0000000000000000000000000000000000000002';
 const dsm = '0x0000000000000000000000000000000000000003';
@@ -73,4 +73,19 @@ test('current EDF messages decode opaque signatures in Deposit V2, Pause V4 and 
   assert.equal(pause.kind,'pause');
   const unvet=parseCouncilBus(bus('MessageUnvetV2',[200n,empty32,3n,42n,'0x0000000000000001','0x00000000000000000000000000000002',signature,[encodeBytes32String('4.1.2')]]),'gnosis',1000);
   assert.deepEqual(unvet.payload.operatorIds,['1']);assert.deepEqual(unvet.payload.vettedKeysCounts,['2']);
+});
+
+test('Council networks isolate execution contracts, guardian aliases and message transports', () => {
+  assert.equal(councilNetwork(null), 'mainnet');
+  assert.equal(councilNetwork('hoodi'), 'hoodi');
+  assert.equal(councilNetwork('polygon'), null);
+  const mainnet = COUNCIL_NETWORKS.mainnet, hoodi = COUNCIL_NETWORKS.hoodi;
+  assert.notEqual(mainnet.locator.toLowerCase(), hoodi.locator.toLowerCase());
+  assert.equal(COUNCIL_CHAINS[hoodi.executionChain].chainId, 560048);
+  assert.deepEqual(hoodi.busChains.map(c => COUNCIL_CHAINS[c].chainId), [10200]);
+  for (const address of Object.keys(hoodi.labels)) assert.equal(mainnet.labels[address], undefined);
+  for (const chain of hoodi.balanceChains) assert.equal(mainnet.balanceChains.includes(chain), false);
+  const ping = parseCouncilBus(bus('MessagePingV1', [123n, [encodeBytes32String('4.1.2')]]), hoodi.busChains[0], 1000);
+  assert.equal(ping.chain, 'chiado');
+  assert.match(COUNCIL_CHAINS[ping.chain].explorer, /chiado/);
 });
