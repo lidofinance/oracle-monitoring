@@ -1,0 +1,15 @@
+.withdrawal-shell #withdrawal-queue,.withdrawal-shell #funding-balance,.withdrawal-shell #buffer-history,.withdrawal-shell #finalizations { scroll-margin-top:110px; }
+.withdrawal-buffer,.withdrawal-finalizations,.withdrawal-lifecycle { margin-bottom:22px; }
+.withdrawal-bars { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:18px; padding:30px 24px 25px; }
+.withdrawal-bars>div { display:flex; flex-direction:column; align-items:center; gap:9px; min-width:0; }
+.withdrawal-bars strong { font:500 13px Georgia,serif; font-variant-numeric:tabular-nums; }
+.withdrawal-bar-track { width:100%; max-width:66px; height:160px; display:flex; align-items:flex-end; background:linear-gradient(to top,#f4f0e9,transparent); border-bottom:1px solid #d7dfd7; border-radius:4px 4px 0 0; overflow:hidden; }
+.withdrawal-bar-track i { display:block; width:100%; background:#bf8750; border-radius:4px 4px 0 0; min-height:0; transition:height .3s; }
+.withdrawal-bars span,.withdrawal-bars small { font-size:10px; color:var(--muted); text-align:center; }
+.withdrawal-bars small { font-size:9px; }
+.withdrawal-lifecycle ol { list-style:none; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); padding:23px; gap:28px; margin:0; }
+.withdrawal-lifecycle li b { font:500 19px Georgia,serif; }
+.withdrawal-lifecycle li p { font-size:11px; color:var(--muted); line-height:1.8; margin-top:10px; }
+.withdrawal-help { border-top:1px solid var(--line); padding:15px 23px; font-size:10px; }
+.withdrawal-help a { display:inline-flex; align-items:center; gap:7px; color:var(--green); }
+@media(max-width:650px){.withdrawal-lifecycle ol{grid-template-columns:1fr;gap:22px}.withdrawal-bars{gap:9px;padding:24px 14px}.withdrawal-bars strong{font-size:11px}.withdrawal-bars small{font-size:8px}.withdrawal-bar-track{height:130px}}

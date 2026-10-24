@@ -1,3 +1,4 @@
+import { withRpcSelection } from "../../rpc-server";
 import { NextRequest, NextResponse } from "next/server";
 import { Interface } from "ethers";
 
@@ -16,7 +17,8 @@ import {
   safeHashVoteFrames,
   unwrapReportTransaction,
 } from "../../oracle-reports";
-import { HOODI_CHAIN_ID, MAINNET_CHAIN_ID, serverRpcs } from "../../rpc-config";
+import { serverRpcs } from "../../rpc-server";
+import { HOODI_CHAIN_ID, MAINNET_CHAIN_ID } from "../../rpc-config";
 
 type NetworkKey = "mainnet" | "hoodi";
 
@@ -463,7 +465,7 @@ async function resolveVeboOperatorNames(
   }
 }
 
-export async function GET(request: NextRequest) {
+async function handleGet(request: NextRequest) {
   const network = request.nextUrl.searchParams.get("network") as NetworkKey;
   if (network !== "mainnet" && network !== "hoodi") {
     return NextResponse.json(
@@ -577,3 +579,5 @@ export async function GET(request: NextRequest) {
     );
   }
 }
+
+export async function GET(request: NextRequest) { return withRpcSelection(request, handleGet); }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { LIDO_ABI, WITHDRAWAL_ABI, VEBO_ABI, unbufferedAmount, ethAmount, parseFinalization, parseVeboExitRequest } from '../app/depositor-data.ts';
+import { LIDO_ABI, WITHDRAWAL_ABI, VEBO_ABI, unbufferedAmount, ethAmount, parseFinalization, parseVeboExitRequest, finalizationHistoryComplete } from '../app/depositor-data.ts';
 
 import { displayEth } from '../app/depositor-format.ts';
 import { nominalVeboDays } from '../app/depositor-vebo.ts';
@@ -87,4 +87,20 @@ test('daily block selection finds the last block before a cutoff despite missed 
     assert.equal(actual, timestamps.findLastIndex(timestamp => timestamp <= target));
   }
   await assert.rejects(blockAtOrBefore(-1, blocks[0], blocks.at(-1), async number => blocks[number]));
+});
+
+test('finalization completeness requires contiguous request IDs and both boundary states',()=>{
+ const events=[{firstRequestId:'21',lastRequestId:'30'},{firstRequestId:'11',lastRequestId:'20'}];
+ assert.equal(finalizationHistoryComplete(events,'10','30'),true);
+ assert.equal(finalizationHistoryComplete(events.slice(0,1),'10','30'),false);
+ assert.equal(finalizationHistoryComplete(events,'9','30'),false);
+ assert.equal(finalizationHistoryComplete(events,'10','31'),false);
+ assert.equal(finalizationHistoryComplete([],'30','30'),true);
+ assert.equal(finalizationHistoryComplete([],'30','31'),false);
+});
+test('duplicate, overlapping and malformed finalization ranges never appear complete',()=>{
+ const e={firstRequestId:'11',lastRequestId:'20'};
+ assert.equal(finalizationHistoryComplete([e,e],'10','20'),false);
+ assert.equal(finalizationHistoryComplete([e,{firstRequestId:'20',lastRequestId:'30'}],'10','30'),false);
+ assert.equal(finalizationHistoryComplete([{firstRequestId:'11',lastRequestId:'bad'}],'10','20'),false);
 });

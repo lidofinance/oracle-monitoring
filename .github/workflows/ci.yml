@@ -32,7 +32,7 @@ jobs:
         run: npm run test:unit
 
       - name: Build and server-rendered smoke test
-        run: npm run build && node --test tests/rendered-html.test.mjs
+        run: npm run build && node --experimental-strip-types --test tests/rendered-html.test.mjs
 
   docker:
     runs-on: ubuntu-latest

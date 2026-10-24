@@ -1,5 +1,11 @@
 "use client";
+import { DATA_REFRESH_INTERVAL_MS } from "./refresh-policy";
 
+import SiteHeader, { NetworkBar } from "./site-header";
+import { useLoadingTask } from "./loading-status";
+import { useAutoRetry } from "./use-auto-retry";
+import { rpcFetch, readRpcChoiceRaw, subscribeRpcChoice } from "./rpc-client";
+import { parseRpcChoice } from "./rpc-selection";
 import {
   AbiCoder,
   Contract,
@@ -25,7 +31,6 @@ import {
   RefreshCw,
   Search,
   ServerCog,
-  ShieldCheck,
   X,
 } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
@@ -433,66 +438,14 @@ async function connect(rpcs: readonly string[]) {
   throw lastError ?? new Error("No RPC endpoint responded");
 }
 
-// The chosen endpoint is tried first; the defaults stay as a fallback so a
-// broken custom URL does not take the console down.
+// An explicit source is used alone; Auto retains the configured fallback list.
 function rpcCandidates(network: NetworkKey, choice: RpcChoice) {
   const chosen = choice[network];
   const defaults = NETWORKS[network].rpc;
-  return chosen ? [chosen, ...defaults.filter((url) => url !== chosen)] : defaults;
+  return chosen ? [chosen] : defaults;
 }
 
-const RPC_STORAGE_KEY = "oracle-watch.rpc";
-const rpcChoiceListeners = new Set<() => void>();
 
-function readRpcChoiceRaw() {
-  try {
-    return window.localStorage.getItem(RPC_STORAGE_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function parseRpcChoice(raw: string): RpcChoice {
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const choice: RpcChoice = {};
-    for (const network of ["mainnet", "hoodi"] as const) {
-      const value = parsed[network];
-      if (typeof value === "string" && /^https?:\/\//.test(value)) {
-        choice[network] = value;
-      }
-    }
-    return choice;
-  } catch {
-    return {};
-  }
-}
-
-function writeRpcChoice(choice: RpcChoice) {
-  try {
-    window.localStorage.setItem(RPC_STORAGE_KEY, JSON.stringify(choice));
-  } catch {
-    // Private mode or blocked storage: the choice lives for this page only.
-  }
-  rpcChoiceListeners.forEach((listener) => listener());
-}
-
-function subscribeRpcChoice(listener: () => void) {
-  rpcChoiceListeners.add(listener);
-  window.addEventListener("storage", listener);
-  return () => {
-    rpcChoiceListeners.delete(listener);
-    window.removeEventListener("storage", listener);
-  };
-}
-
-function hostOf(url: string) {
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-}
 
 // Read the state of a DelegationContract; null when the address is not one
 // (a plain EOA member, or a contract without the EDF interface).
@@ -1111,105 +1064,6 @@ function CopyButton({
   );
 }
 
-const CUSTOM_RPC = "custom";
-
-function RpcPicker({
-  network,
-  choice,
-  connectedUrl,
-  onChange,
-}: {
-  network: NetworkKey;
-  choice: RpcChoice;
-  connectedUrl?: string;
-  onChange: (url: string) => void;
-}) {
-  const defaults = NETWORKS[network].rpc;
-  const chosen = choice[network] ?? "";
-  const isCustom = chosen !== "" && !defaults.includes(chosen);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  const chosenFailed =
-    chosen !== "" && connectedUrl !== undefined && connectedUrl !== chosen;
-
-  const apply = () => {
-    const url = draft.trim();
-    if (!/^https?:\/\//.test(url)) return;
-    onChange(url);
-    setEditing(false);
-  };
-
-  return (
-    <div
-      className={`rpc-picker ${chosenFailed ? "failed" : ""}`}
-      title={
-        chosenFailed
-          ? `${chosen} did not respond, using ${connectedUrl}`
-          : connectedUrl
-            ? `Connected to ${connectedUrl}`
-            : `Browser RPC for ${NETWORKS[network].label}`
-      }
-    >
-      <span className={`pulse ${connectedUrl ? "" : "idle"}`} />
-      <span className="rpc-label">RPC</span>
-      <select
-        aria-label={`${NETWORKS[network].label} RPC endpoint`}
-        value={editing ? CUSTOM_RPC : chosen}
-        onChange={(event) => {
-          const value = event.target.value;
-          if (value === CUSTOM_RPC) {
-            setDraft(isCustom ? chosen : "");
-            setEditing(true);
-            return;
-          }
-          setEditing(false);
-          onChange(value);
-        }}
-      >
-        <option value="">
-          {connectedUrl && chosen === ""
-            ? `Auto · ${hostOf(connectedUrl)}`
-            : "Auto"}
-        </option>
-        {defaults.map((url) => (
-          <option key={url} value={url}>
-            {hostOf(url)}
-          </option>
-        ))}
-        {isCustom && !editing && <option value={chosen}>{hostOf(chosen)}</option>}
-        <option value={CUSTOM_RPC}>Custom URL…</option>
-      </select>
-      {editing && (
-        <form
-          className="rpc-custom"
-          onSubmit={(event) => {
-            event.preventDefault();
-            apply();
-          }}
-        >
-          <input
-            type="url"
-            autoFocus
-            placeholder="https://rpc.example/…"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") setEditing(false);
-            }}
-            aria-label="Custom RPC URL"
-          />
-          <button type="submit">
-            <Check size={14} />
-          </button>
-          <button type="button" onClick={() => setEditing(false)}>
-            <X size={14} />
-          </button>
-        </form>
-      )}
-    </div>
-  );
-}
-
 function RouteButton({
   value,
   onCopied,
@@ -1564,6 +1418,8 @@ export default function OracleMonitor() {
   const [oraclePayloads, setOraclePayloads] = useState<
     Partial<Record<string, OracleReportsPayload>>
   >({});
+  const [reportRetry,setReportRetry]=useState(0);
+  const reportRetryUsed=useRef<Record<string,number>>({});
   const [oracleLoading, setOracleLoading] = useState(false);
   const [oracleError, setOracleError] = useState<string | null>(null);
   const [selectedOracleReport, setSelectedOracleReport] =
@@ -1571,6 +1427,8 @@ export default function OracleMonitor() {
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState(false);
 
+  useLoadingTask(network,"Oracle members and telemetry",loading,!!error);
+  useLoadingTask(network,"Oracle reports",view==="oracle"&&(oracleLoading||(!oraclePayloads[`${network}:${hashVoteFrames}`]&&!oracleError)),view==="oracle"&&(!!oracleError||!!oraclePayloads[`${network}:${hashVoteFrames}`]?.warnings?.length));
   const routeFor = useCallback(
     (
       nextView: ViewKey,
@@ -1731,7 +1589,7 @@ export default function OracleMonitor() {
 
   useEffect(() => {
     const initial = window.setTimeout(() => void load(), 0);
-    const timer = window.setInterval(load, 5 * 60 * 1000);
+    const timer = window.setInterval(load, DATA_REFRESH_INTERVAL_MS);
     return () => {
       window.clearTimeout(initial);
       window.clearInterval(timer);
@@ -1739,13 +1597,18 @@ export default function OracleMonitor() {
   }, [load]);
 
   const oraclePayloadKey = `${network}:${hashVoteFrames}`;
+  useAutoRetry(view==='oracle'&&(!!oracleError||!!oraclePayloads[oraclePayloadKey]?.warnings?.length),oracleLoading,()=>setReportRetry(n=>n+1),`${oraclePayloadKey}:${view}`);
   useEffect(() => {
-    if (view !== "oracle" || oraclePayloads[oraclePayloadKey]) return;
+    if (view !== "oracle" || (oraclePayloads[oraclePayloadKey]&&(reportRetryUsed.current[oraclePayloadKey]??0)===reportRetry)) {
+      const idle=window.setTimeout(()=>setOracleLoading(false),0);
+      return()=>window.clearTimeout(idle);
+    }
+    reportRetryUsed.current[oraclePayloadKey]=reportRetry;
     const controller = new AbortController();
     const start = window.setTimeout(() => {
       setOracleLoading(true);
       setOracleError(null);
-      fetch(`/api/oracle-reports?network=${network}&frames=${hashVoteFrames}`, {
+      rpcFetch(`/api/oracle-reports?network=${network}&frames=${hashVoteFrames}`, {
         signal: controller.signal,
       })
         .then(async (response) => {
@@ -1784,7 +1647,7 @@ export default function OracleMonitor() {
       window.clearTimeout(start);
       controller.abort();
     };
-  }, [hashVoteFrames, network, oraclePayloadKey, oraclePayloads, view]);
+  }, [hashVoteFrames, network, oraclePayloadKey, oraclePayloads, view, reportRetry]);
 
   const copied = useCallback(() => {
     setToast(true);
@@ -2007,41 +1870,7 @@ export default function OracleMonitor() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <Radio size={18} />
-          </span>
-          <div>
-            <strong>Lido Oracle Watch</strong>
-            <span>Onchain operations console</span>
-          </div>
-        </div>
-        <nav className="view-tabs" aria-label="Monitor views">
-          <button
-            type="button"
-            className={view === "overview" ? "active" : ""}
-            onClick={() => navigate("overview")}
-          >
-            <Activity size={16} /> Overview
-          </button>
-          <button
-            type="button"
-            className={view === "telemetry" ? "active" : ""}
-            onClick={() => navigate("telemetry")}
-          >
-            <FileJson size={16} /> Telemetry details
-          </button>
-          <button
-            type="button"
-            className={view === "oracle" ? "active" : ""}
-            onClick={() => navigate("oracle")}
-          >
-            <ListTree size={16} /> Oracle reports
-          </button>
-          <a className="council-nav-link" href="/council"><ShieldCheck size={16} /> Council</a>
-        </nav>
-        <div className="top-actions">
+      <SiteHeader network={network} title="Lido Oracle Watch" subtitle="Onchain operations console" icon={<Radio size={18}/>} actions={<>
           <span className="updated">
             {updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Live RPC"}
           </span>
@@ -2069,52 +1898,34 @@ export default function OracleMonitor() {
             />
             Refresh
           </button>
-        </div>
-      </header>
+      </>} navigation={<nav className="view-tabs" aria-label="Monitor views">
+          <button
+            type="button"
+            className={view === "overview" ? "active" : ""}
+            onClick={() => navigate("overview")}
+          >
+            <Activity size={16} /> Overview
+          </button>
+          <button
+            type="button"
+            className={view === "telemetry" ? "active" : ""}
+            onClick={() => navigate("telemetry")}
+          >
+            <FileJson size={16} /> Telemetry details
+          </button>
+          <button
+            type="button"
+            className={view === "oracle" ? "active" : ""}
+            onClick={() => navigate("oracle")}
+          >
+            <ListTree size={16} /> Oracle reports
+          </button>
+        </nav>}/>
 
-      <section className="context-bar">
-        <div className="network-switch" aria-label="Network">
-          {(["mainnet", "hoodi"] as const).map((key) => (
-            <button
-              type="button"
-              key={key}
-              className={network === key ? "active" : ""}
-              onClick={() => {
-                setSelectedReport(null);
-                setSelectedOracleReport(null);
-                navigate(view, key);
-              }}
-            >
-              <span className={`network-dot ${key}`} />
-              {NETWORKS[key].label}
-              <small>{NETWORKS[key].chainLabel}</small>
-            </button>
-          ))}
-        </div>
-        <div className="chain-state">
-          <RpcPicker
-            network={network}
-            choice={rpcChoice}
-            connectedUrl={data?.rpcUrl}
-            onChange={(url) =>
-              writeRpcChoice({ ...rpcChoice, [network]: url || undefined })
-            }
-          />
-          {data && (
-            <>
-              <span>Block {data.blockNumber.toLocaleString()}</span>
-              <a
-                href={`${DATABUS_EXPLORER}/address/${DATABUS}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                DataBus {shorten(DATABUS)}
-                <ExternalLink size={13} />
-              </a>
-            </>
-          )}
-        </div>
-      </section>
+
+      <NetworkBar network={network} label="Oracle network" onChange={key => {
+        setSelectedReport(null); setSelectedOracleReport(null); navigate(view, key);
+      }}/>
 
       {loading && !snapshot ? (
         <LoadingState />
@@ -2176,7 +1987,7 @@ export default function OracleMonitor() {
               </div>
             </div>
 
-            <section className="panel participation-panel">
+            <section className="panel participation-panel" id="members">
               <header className="panel-header">
                 <div>
                   <h2>Participation matrix</h2>
@@ -2944,7 +2755,7 @@ export default function OracleMonitor() {
       )}
       <footer className="app-footer">
         <span>
-          <Clock3 size={13} /> Auto-refreshes every 5 minutes
+          <Clock3 size={13} /> Auto-refreshes every 10 minutes
         </span>
         <span>
           Membership: HashConsensus · Telemetry: DataBus · Reports:

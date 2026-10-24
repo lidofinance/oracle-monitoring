@@ -34,8 +34,7 @@ Curated Module fee oracle (CM).
 
 `/depositor/` monitors Lido’s public onchain deposit and top-up activity on
 Mainnet and Hoodi. It shows depositable ETH, buffered and total pooled ETH,
-current gas wallet balances, EDF delegates/owners, pause gates, withdrawal
-queue demand and claimable ETH, historical buffer/demand samples and a searchable transaction ledger with Etherscan links.
+current gas wallet balances, EDF delegates/owners, pause gates, historical buffer/demand samples and a searchable transaction ledger with Etherscan links.
 
 The API at `/api/depositor?network=mainnet` (or `hoodi`) resolves protocol
 contracts from the canonical Lido Locator and discovers every current
@@ -238,6 +237,23 @@ and validator index. The report's encoded ordering is distinct from selection
 ordering. The inspected Oracle's hardcoded request cap is 500; users can
 explicitly explore a hypothetical higher cap.
 
+Mainnet is selected by default. Opening the simulator automatically loads the
+selected network's current VEBO reference-state snapshot into the controls and
+reset baseline. Controls and simulated reports stay in a loading/error state
+until real data is ready; they do not expose the fictional example during
+collection or fall back to it on failure. The example requires an explicit
+button click. Switching networks clears the previous scenario while the next
+network loads. Edits made after loading remain local and Reset restores that
+loaded baseline.
+
+Live scenarios retain each eligible validator's KAPI public key along with its
+Beacon index, cap and predicted balance. The source panel shows operator/key
+counts and links to the selected network's KAPI. Selected-validator details
+and queue rows display copyable public keys, and JSON export preserves them.
+Imported keys must be unique 48-byte hex values; older scenarios without keys
+remain supported and do not acquire invented identities. The snapshot cache
+requires key-data version 1 so index-only legacy entries are recollected.
+
 The simulator uses individual predictable principal and 32/2048 ETH effective
 balance caps independently. Both request-count and ETH limits stop selection;
 a candidate that exceeds the ETH budget is not skipped. Exits selected in earlier
@@ -266,8 +282,10 @@ an archive Beacon API with the corresponding states. Configure comma-separated
 bases default to `https://keys-api.lido.fi` and
 `https://keys-api-hoodi.testnet.fi`; override with `MAINNET_KEYS_API_URL` /
 `HOODI_KEYS_API_URL`. EL providers use the existing network RPC variables.
-Jobs are shared per network/state mode, cached for 15 minutes after completion,
-and failed jobs may retry after one minute. This collector requires the
+Jobs are shared per network, selected RPC and state mode. Completed snapshots
+are cached for ten minutes after collection; reporting-frame snapshots expire
+earlier if their frame ends. Failed jobs expire after ten minutes. Cache metadata
+reports the collection and expiry times in the simulator. This collector requires the
 persistent Node runtime; an edge request lifecycle is not sufficient.
 
 The snapshot provides real selection inputs, **not** a complete reproduction
@@ -280,7 +298,7 @@ Include `deployment/vebo-simulator-routes.nginx.conf` in the TLS server blocks
 that host the root-path runtime, beside the Council and Depositor includes.
 Completed snapshots are also stored in the ignored `.cache/vebo` directory
 (`VEBO_CACHE_DIR` overrides it), so restarts can reuse a snapshot within its
-15-minute lifetime. Cache writes are atomic and optional; a failed disk write
+validity window. Cache writes are atomic and optional; a failed disk write
 does not invalidate the collected data. Pending deposit verification yields
 between small batches to keep the monitoring server responsive.
 
@@ -289,3 +307,143 @@ public providers remain fallbacks. Finalized scenarios and block/header reads
 prefer public providers, so an unavailable archive node does not disable the
 explicit finalized-scenario mode. Archive state reads allow up to three minutes
 for historical-state reconstruction. Beacon URLs are server-only settings.
+
+## Consolidation Watch
+
+`/consolidation?network=mainnet` (or `hoodi`) monitors the ConsolidationBus,
+ConsolidationMigrator and the gateway discovered from the bus. It replays all
+publication, execution, removal and Migrator attribution events from the bus's
+deployment through a finalized EL block. Each publication is a separate
+occurrence: an identical batch hash may be submitted again after execution or
+removal. Both queue and execution ledger are ordered oldest first, including
+log order within a block. Pending batches are reconciled with `getBatchInfo`.
+All contract reads, protocol pause checks and balances use the same block.
+
+CMv1 requested coverage counts unique `(source operator, source key index)`
+pairs from Migrator publications, divided by **all ever-deposited CMv1
+validators** from StakingRouter operator digests at the finalized block.
+Removed requests count toward this explicitly labeled participation metric;
+resubmissions do not inflate it. Status-specific counts may overlap after a
+resubmission. Publication is not execution, and EL execution does not prove CL
+completion. Nominal ETH uses 32 ETH per source and is labeled accordingly.
+Operator names come from the network's Keys API; unavailable names fall back to
+on-chain operator IDs without replacing counts with zeros.
+
+The quota chart and oldest-batch estimate reproduce the gateway's discrete
+`RateLimit` restoration frames. The collector reads the gateway's public
+`CONSOLIDATION_LIMIT_POSITION`, unpacks its uint32 fields, and verifies them
+against `getConsolidationRequestLimitFullInfo`. The previous timestamp provides
+exact frame boundaries. Zero max means unlimited, zero restoration means no
+recovery, and a batch larger than the ceiling has no finite estimate. The
+estimate waits for both the current (retroactive) bus delay and sufficient
+quota, and is suppressed while the gateway, DSM or Lido blocks consolidations.
+It assumes no competing consumption or limit changes; proofs, fee/gas ceilings,
+validator eligibility and bot polling may delay actual execution.
+
+`GET /api/consolidation?network=mainnet` starts/polls a background snapshot:
+202 while collecting, 200 when complete, 503 if reconciliation fails. The
+persistent Node runtime is required. Snapshots refresh after two minutes;
+failed attempts retry after a minute, preserving an earlier complete snapshot
+with an error notice. An atomic, optional history checkpoint in ignored
+`.cache/consolidation` (`CONSOLIDATION_CACHE_DIR` overrides it) avoids rescanning
+all history on restart. Its block hash must match the canonical finalized
+chain before reuse. Network caches are isolated. RPC and Keys API overrides
+are the existing network-specific server settings.
+
+`view=transactions&page=0` returns sender/receipt details for pages of 25
+successful execution transactions, including permissionless executors other
+than the published bot. `view=attempts` independently loads the published
+Mainnet bot signer's calls to ConsolidationBus over the last 30 days from
+Blockscout, including reverted attempts. Coverage failures and the pagination
+cap are visible; a missing indexer never turns failed-attempt counts into zero.
+Hoodi has no configured published bot signer, so its event-backed executor
+ledger is available while the signer-specific feed is explicitly unavailable.
+The Mainnet signer is sourced from the Lido governance funding proposal,
+linked on the page. Indexer transaction statuses are shown as reported.
+
+Include `deployment/consolidation-routes.nginx.conf` in each TLS server block
+hosting the root-path monitor runtime. `/assets/` remains served by that
+runtime, alongside the existing Depositor, Council and VEBO routes.
+
+## Root landing page
+
+`/portal` is the shared monitor runtime's landing page. On `f4ever.pl` and
+`www.f4ever.pl`, replace the old exact `/` redirect with
+`deployment/portal-root.nginx.conf` (installed as
+`/etc/nginx/snippets/portal-root.conf`). The public URL remains `/`; nginx
+proxies it internally to `/portal`, forwarding its network query string.
+The standalone Oracle runtime's `/oracle` dashboard remains unchanged, and the
+repository's existing `/` Oracle entry point still works for standalone
+installations. Keep the shared runtime's existing `/assets/` location.
+
+Five cards link to Oracles, Depositor, Council, VEBO Simulator and Consolidation.
+The network selector sets Mainnet/Hoodi on every dashboard link; Oracle
+Overview, Telemetry and Reports also have direct shortcuts. Each card has a
+purpose-specific SVG/CSS scene that animates on hover and keyboard focus.
+Reduced-motion preferences disable animation and transitions. The landing
+page makes no chain requests or claims about bot health.
+
+Homepage cards include short descriptions and direct section shortcuts. Each
+dashboard header has a Home link that preserves the selected network. A shared
+hash-navigation helper waits for asynchronously loaded sections before scrolling;
+this lets member lists, withdrawal queues and consolidation limits be linked
+directly without requiring their RPC snapshots at initial render.
+
+Depositor includes a network-wide Ethereum validator exit queue, collected
+independently through `/api/depositor?network=mainnet&view=exit-queue` (or Hoodi).
+PublicNode's corresponding Beacon API supplies a verified, current head and two
+lists pinned to its state root: active exiting/slashed validators and pending
+consolidations. Genesis root and deposit chain ID must match the selected network.
+Queued ETH sums effective balances; consolidation sources are counted separately
+and excluded from the ordinary exit schedule. The wait describes the existing
+queue's last assigned exit epoch, not a forecast for a newly submitted request.
+Withdrawal eligibility delay is read from that network's spec; the later sweep
+and Lido withdrawal finalization are separate. Client refresh and server caching
+are one minute. Failed updates show explicitly stale data for at most 15 minutes,
+then unavailable. Configured `MAINNET_BEACON_URLS` / `HOODI_BEACON_URLS` are fallback
+providers; private URLs are never sent to the browser.
+
+The Buffer over time chart also includes Lido exiting + awaiting-withdrawal ETH.
+`/api/depositor?network=mainnet&view=exit-balances` starts/polls an independent
+daily backfill, leaving the rest of the dashboard responsive. Each UTC close
+uses one canonical Beacon block and its pinned validator and consolidation
+state. Current balances include active exits, exited validators and withdrawable
+validators with nonzero balances. Pending consolidation sources are excluded.
+KAPI's `/v1/keys/find` establishes membership among used Lido keys; balances are
+the actual Gwei balances, including rewards/penalties, not a fixed 32 ETH amount
+or effective balance. Sources and networks must agree. Missing historical states
+remain gaps. Hover/keyboard inspection shows the validator count and observed
+Beacon timestamp. Historic closes persist in `.cache/lido-exit-balances` (override
+with `LIDO_EXIT_BALANCE_CACHE_DIR`); today's balance refreshes every five minutes.
+Archive endpoints use the configured Beacon URL lists and the previously supplied
+Mainnet/Hoodi Lighthouse endpoints when no custom list is configured.
+
+### Exit-to-withdrawal estimate and Lido incoming ETH
+
+The Ethereum validator exit queue includes an independent `/api/depositor?network=mainnet|hoodi&view=exit-forecast` view. It estimates a **32 ETH ordinary full exit processed at the observed Beacon slot**, using the state's `earliest_exit_epoch` and `exit_balance_to_consume`, plus protocol withdrawal eligibility and an observed sweep cycle. It reads only the ~2.7 MB fixed SSZ state prefix, cancels the remainder, checks the network/slot and Electra/Fulu layout, and measures the withdrawal cursor across pinned states covering the last hour. A shorter verified sample remains usable when older states are unavailable; the actual sample duration is shown. Each sample interval is bounded to prevent unobserved full-cycle wraparound. Half a measured sweep cycle is the average unknown validator position; zero to one cycle is an estimated window, not a guarantee. Inclusion delays, slashed exits and stETH finalization are separate. Configured `MAINNET_BEACON_URLS` / `HOODI_BEACON_URLS` need the binary debug-state endpoint; otherwise the supplied Lighthouse archive nodes are used. Unsupported future state layouts or unreliable progress leave the estimate unavailable.
+
+Lido incoming ETH uses seven days of pinned EL state: closing minus opening Withdrawal Vault and EL Rewards Vault balances, plus `WithdrawalsReceived` / `ELRewardsReceived` amounts collected by Lido in that interval. The collector resolves vault addresses through the locator at both boundaries, requires complete event ranges and stable block hashes, and rejects negative accounting. This includes validator principal and swept consensus rewards, plus EL proposal tips/MEV. The estimated wait-period total extrapolates that recent daily rate, rather than predicting future rewards or validator withdrawals. Timing and inflow load independently, use separate network jobs and refresh after five minutes; unavailable measurements never become fabricated zeroes.
+
+### Withdrawal funding balance
+
+The Withdrawals page compares withdrawal demand + deposit lock with current buffer, vault balances, known incoming exit balances, and projected EL/CL rewards over the exit-to-withdrawal horizon above. `/api/depositor?network=mainnet|hoodi&view=liquidity` collects reserves and known Lido exits at the same recent block, pinned to KAPI's EL snapshot and cross-checked against Beacon genesis, canonical header, payload and EL block hash. KAPI's older CL indexing timestamp is not substituted for the current state. Exiting/awaiting validators are matched with KAPI and Lido withdrawal credentials; consolidation sources are excluded. Only those whose withdrawable time plus half the measured sweep cycle is inside the horizon contribute. Capped balances (32/2048 ETH) are counted as exits and known excess is added to CL rewards once.
+
+The current deposits reserve is included on the required side because the full buffer is shown on the funding side. Future deposit consumption uses the Ejector average-case formula: complete accounting frames × min(reserve target, maximum withdrawal request) ÷ 2. Values and assumptions are visible in the widget's methodology. This is a planning model, not an exact replay of a VEBO report: it uses the dashboard's mean sweep estimate and excludes future withdrawal requests, new user deposits and exit messages not yet scheduled by consensus.
+
+CL reward rates pair ETHDistributed and TokenRebased by transaction hash and report timestamp, using (postCLBalance + withdrawalsWithdrawn − preCLBalance) / timeElapsed, floored at zero. Missing/duplicate/mismatched reports leave the rate unavailable and prevent complete model totals. EL projections reuse the independently reconciled vault-arrival rate. Current vault balances are added once, not multiplied by time. CL rewards can compound and remain on Beacon Chain, so accrual projections are explicitly distinguished from guaranteed cash arrivals. Both networks use isolated jobs, short-lived caches, and no fabricated zeroes for unavailable components.
+
+## Withdrawals dashboard
+
+`/withdrawals?network=mainnet|hoodi` is the dedicated home for the Ethereum validator exit queue, exit-to-withdrawal estimates, withdrawal funding balance and Lido's withdrawal queue. It retains Mainnet/Hoodi selection and a Home link. The Buffer over time component is shared with `/depositor`, preserving its daily UTC readings, Lido exit balance line and whole-ETH tooltip behavior on both pages. Depositor Watch retains its deposit/top-up monitoring, gas-wallet link, transaction ledger and daily ETH moved chart; the queue and funding widgets are no longer duplicated there.
+
+Withdrawal Watch adds demand/pending/claimable summary tiles, seven-day finalized ETH and request counts, a daily finalization chart, a transaction-linked finalization history and a short request/finalize/claim lifecycle explanation. Finalized ETH is distinct from claimed ETH; missing finalization ranges are marked incomplete. Shared data continues to use the existing network-isolated `/api/depositor` views and caches. The portal has a dedicated Withdrawals card with network-preserving shortcuts, and its Depositor card links to buffer, bot wallet and transactions. The root nginx snippet routes both `/withdrawals` and `/withdrawals/` to port 3012.
+
+Finalization completeness also reconciles the event request-ID sequence against `getLastFinalizedRequestId` at both boundaries of the loaded block range. Missing days or a truncated successful RPC response trigger an alternate-provider retry; remaining gaps mark totals incomplete rather than silently becoming zero days.
+
+### Shared RPC selection
+
+The network bar on Home and every dashboard has an execution-layer RPC picker. Auto uses the configured endpoint list; an explicit public preset uses only that provider. Choices are saved per network in the browser and shared across sections. Changing a choice reloads the page to restart all collectors together. Beacon and Keys API sources remain independently configured. Server requests carry a validated preset ID, and provider-dependent jobs and caches are separated by network and RPC.
+
+The shared header shows an animated Loading data indicator while any visible collector, background polling job or simulator calculation is pending. Loaded means the current page has no pending work; Partial data means loading has finished with an unavailable source. Hovering the status lists the outstanding or unavailable datasets.
+
+Read-only API requests automatically retry temporary network failures and HTTP 408/425/429/500/502/503/504 responses up to four attempts with backoff and Retry-After support. Cancellation stops outstanding attempts. Exhausted or partial page loads retry after 15/30/60/120 seconds without clearing existing data. Failed background jobs expire sooner; successful forecast components are reused while only failed components recover. Editing a simulator scenario cancels an outstanding snapshot retry.

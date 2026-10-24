@@ -1,12 +1,17 @@
+import { withRpcSelection } from "../../rpc-server";
 import { NextRequest, NextResponse } from "next/server";
 import { Interface, id, isAddress } from "ethers";
 import {
   LIDO_ABI, LOCATOR_ABI, DSM_ABI, EDF_ABI, GATEWAY_ABI, ROUTER_ABI, WITHDRAWAL_ABI, VEBO_ABI,
-  ethAmount, unbufferedAmount, parseFinalization, parseVeboExitRequest,
+  ethAmount, unbufferedAmount, parseFinalization, parseVeboExitRequest, finalizationHistoryComplete,
   type DepositorSnapshot, type DepositorTransaction, type DepositorWallet,
 } from "../../depositor-data";
-import { serverRpcs } from "../../rpc-config";
+import { serverRpcs, rpcCacheKey } from "../../rpc-server";
 import { dailySnapshotTimes, blockAtOrBefore } from "../../depositor-history";
+import { readExitQueue } from "../../ethereum-exit-queue";
+import { readLidoExitBalances } from "../../lido-exit-balances";
+import { readExitWithdrawalForecast } from "../../exit-withdrawal-forecast";
+import { readLiquiditySnapshot } from "../../depositor-liquidity";
 
 type Network = "mainnet" | "hoodi";
 type Block = { number: string; timestamp: string };
@@ -20,14 +25,16 @@ const CONFIG = {
 const hex = (n: number) => `0x${n.toString(16)}`;
 const num = (s: string) => Number(BigInt(s));
 const ZERO = "0x0000000000000000000000000000000000000000";
-const snapshots = new Map<Network, { expires: number; promise: Promise<DepositorSnapshot> }>();
-const details = new Map<Network, { expires: number; promise: Promise<Pick<DepositorSnapshot, "history" | "transactions" | "withdrawals" | "withdrawalsComplete" | "veboRequests" | "veboComplete" | "activityFrom" | "activityTo" | "activityTruncated" | "warnings">> }>();
+const snapshots = new Map<string, { expires: number; promise: Promise<DepositorSnapshot> }>();
+const details = new Map<string, { expires: number; promise: Promise<Pick<DepositorSnapshot, "history" | "transactions" | "withdrawals" | "withdrawalsComplete" | "veboRequests" | "veboComplete" | "activityFrom" | "activityTo" | "activityTruncated" | "warnings">> }>();
 
 class Chain {
   network: Network;
   constructor(network: Network) { this.network = network; }
-  async rpc<T>(method: string, params: unknown[]): Promise<T> {
-    for (const endpoint of serverRpcs(this.network).slice(0, 3)) {
+  async rpc<T>(method: string, params: unknown[], preferredOffset = 0): Promise<T> {
+    const providers = serverRpcs(this.network).slice(0, 3);
+    const ordered = [...providers.slice(preferredOffset), ...providers.slice(0, preferredOffset)];
+    for (const endpoint of ordered) {
       try {
         const response = await fetch(endpoint, {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -91,7 +98,7 @@ async function loadDetails(chain: Chain, block: number, addresses: DepositorSnap
     for (const log of logs) candidates.set(log.transactionHash, { hash: log.transactionHash, kind, block: num(log.blockNumber) });
   });
   let withdrawalsComplete = true;
-  const withdrawals = (await mapLimit(ranges, 3, async ({ start, end }) => {
+  let withdrawals = (await mapLimit(ranges, 3, async ({ start, end }) => {
     const logs = await optional(() => chain.rpc<Log[]>("eth_getLogs", [{
       address: addresses.withdrawalQueue,
       topics: [WITHDRAWAL_ABI.getEvent("WithdrawalsFinalized")!.topicHash],
@@ -103,6 +110,24 @@ async function loadDetails(chain: Chain, block: number, addresses: DepositorSnap
       catch { withdrawalsComplete = false; return []; }
     });
   })).flat().sort((a, b) => b.block - a.block);
+  const [beforeFinalized, afterFinalized] = await Promise.all([
+    from === 0 ? Promise.resolve("0") : optional(async () => String(await chain.call(addresses.withdrawalQueue, WITHDRAWAL_ABI, "getLastFinalizedRequestId", [], from - 1))),
+    optional(async () => String(await chain.call(addresses.withdrawalQueue, WITHDRAWAL_ABI, "getLastFinalizedRequestId", [], block))),
+  ]);
+  const verified = () => beforeFinalized !== null && afterFinalized !== null && finalizationHistoryComplete(withdrawals, beforeFinalized, afterFinalized);
+  if (!verified()) {
+    // Some RPCs silently return a subset of logs. Prefer another provider and
+    // merge by event identity, then require an unbroken request-ID sequence.
+    const recovered = await optional(async () => (await mapLimit(ranges, 3, async ({ start, end }) => {
+      const logs = await chain.rpc<Log[]>("eth_getLogs", [{address: addresses.withdrawalQueue, topics: [WITHDRAWAL_ABI.getEvent("WithdrawalsFinalized")!.topicHash], fromBlock: hex(start), toBlock: hex(end)}], 1);
+      return logs.map(parseFinalization);
+    })).flat());
+    if (recovered) {
+      const all = new Map([...withdrawals, ...recovered].map(e => [`${e.hash}:${e.firstRequestId}`, e]));
+      withdrawals = [...all.values()].sort((a,b) => b.block - a.block);
+    }
+  }
+  withdrawalsComplete = verified();
   if (!withdrawalsComplete) warnings.push("Some withdrawal finalizations could not be loaded; fulfilled totals are incomplete.");
   let veboComplete = true;
   const veboRequests = (await mapLimit(ranges, 3, async ({ start, end }) => {
@@ -214,14 +239,14 @@ async function load(network: Network): Promise<DepositorSnapshot> {
     return wallet(chain, holder, block);
   }) : [];
   const depositMined = lastDepositBlock ? await optional(() => chain.block(Number(lastDepositBlock))) : null;
-  let cached = details.get(network);
+  let cached = details.get(rpcCacheKey(network));
   if (!cached || cached.expires < Date.now()) {
     const promise = loadDetails(chain, block, addresses);
-    cached = { expires: Date.now() + 300_000, promise }; details.set(network, cached);
-    void promise.catch(() => details.delete(network));
+    cached = { expires: Date.now() + 300_000, promise }; details.set(rpcCacheKey(network), cached);
+    void promise.catch(() => details.delete(rpcCacheKey(network)));
   }
   const activity = await cached.promise;
-  if (activity.warnings.length) cached.expires = Math.min(cached.expires, Date.now() + 60_000);
+  if (activity.warnings.length) cached.expires = Math.min(cached.expires, Date.now() + 15_000);
   const warnings = [...activity.warnings];
   if ([demand, pendingRequests, claimableEther, lastRequestId, lastFinalizedRequestId, paused, bunker].some((value) => value === null)) warnings.push("Some withdrawal queue information is currently unavailable.");
   if (holderCount === null) warnings.push("Could not discover TOP_UP_ROLE holders from the current gateway.");
@@ -246,18 +271,29 @@ async function load(network: Network): Promise<DepositorSnapshot> {
   };
 }
 
-export async function GET(request: NextRequest) {
+async function handleGet(request: NextRequest) {
   const requested = request.nextUrl.searchParams.get("network") ?? "mainnet";
   if (requested !== "mainnet" && requested !== "hoodi") return NextResponse.json({ error: "Choose mainnet or hoodi." }, { status: 400 });
-  let cached = snapshots.get(requested);
+  if (request.nextUrl.searchParams.get("view") === "liquidity") return NextResponse.json(readLiquiditySnapshot(requested), { headers: { "Cache-Control": "no-store" } });
+  if (request.nextUrl.searchParams.get("view") === "exit-forecast") return NextResponse.json(readExitWithdrawalForecast(requested), { headers: { "Cache-Control": "no-store" } });
+  if (request.nextUrl.searchParams.get("view") === "exit-balances") return NextResponse.json(readLidoExitBalances(requested), { headers: { "Cache-Control": "no-store" } });
+  if (request.nextUrl.searchParams.get("view") === "exit-queue") {
+    const queue = await readExitQueue(requested);
+    return NextResponse.json(queue, { status: queue.status === "unavailable" ? 503 : 200, headers: { "Cache-Control": "no-store" } });
+  }
+  let cached = snapshots.get(rpcCacheKey(requested));
   if (!cached || cached.expires < Date.now()) {
     const promise = load(requested);
-    cached = { expires: Date.now() + 60_000, promise }; snapshots.set(requested, cached);
-    void promise.catch(() => snapshots.delete(requested));
+    cached = { expires: Date.now() + 60_000, promise }; snapshots.set(rpcCacheKey(requested), cached);
+    void promise.catch(() => snapshots.delete(rpcCacheKey(requested)));
   }
   try {
-    return NextResponse.json(await cached.promise, { headers: { "Cache-Control": "public, max-age=30, s-maxage=60" } });
+    const snapshot=await cached.promise;
+    if(snapshot.warnings.length)cached.expires=Math.min(cached.expires,Date.now()+15_000);
+    return NextResponse.json(snapshot, { headers: { "Cache-Control": "public, max-age=30, s-maxage=60" } });
   } catch {
     return NextResponse.json({ error: "Live Ethereum data is temporarily unavailable. Please retry shortly." }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 }
+
+export async function GET(request: NextRequest) { return withRpcSelection(request, handleGet); }

@@ -2,7 +2,7 @@
 // rounded to Gwei; report funding is an explicit user assumption, not a CL forecast.
 export type ExitMode = "none" | "soft" | "force";
 export type SimModule = { id: number; name: string; exitShareBps: number };
-export type SimValidator = { index: number; balanceETH: number; maxEffectiveETH: 32 | 2048 };
+export type SimValidator = { index: number; pubkey?: string; balanceETH: number; maxEffectiveETH: 32 | 2048 };
 export type SimOperator = {
   id: string; moduleId: number; name: string; validators: number; excluded: number; pending: number;
   balanceETH: number; credential: "0x01" | "0x02"; weight: number; mode: ExitMode; target: number; indexStart: number;
@@ -39,7 +39,7 @@ export function validateScenario(input: unknown): ExitScenario {
   if (s.version !== 1 || !["mainnet", "hoodi"].includes(s.network)) throw new Error("Unsupported scenario version or network");
   for (const [key, [min, max]] of Object.entries(scalarBounds)) num(s[key as keyof typeof scalarBounds], min, max, key, key === "reports" || key === "maxRequests");
   if (!Array.isArray(s.modules) || !s.modules.length || s.modules.length > 20 || !Array.isArray(s.operators) || s.operators.length > 5000 || !Array.isArray(s.groups) || s.groups.length > 1000) throw new Error("Invalid module, operator or group list");
-  const modules = new Set<number>(), ids = new Set<string>(), indexes = new Set<number>();
+  const modules = new Set<number>(), ids = new Set<string>(), indexes = new Set<number>(), pubkeys = new Set<string>();
   const text = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 512;
   for (const m of s.modules) {
     num(m.id, 1, 1e6, "module ID", true); num(m.exitShareBps, 0, 10000, "exit share", true);
@@ -56,6 +56,12 @@ export function validateScenario(input: unknown): ExitScenario {
       if (!Array.isArray(o.validatorData) || o.validatorData.length > 1000000 || o.validatorData.length !== o.validators - o.excluded) throw new Error("Explicit validators must match the eligible count");
       for (const v of o.validatorData) {
         num(v.index, 0, 1e10, "validator index", true); if (indexes.has(v.index)) throw new Error("Duplicate explicit validator index"); indexes.add(v.index);
+        if (v.pubkey !== undefined) {
+          if (typeof v.pubkey !== "string" || !/^0x[\da-f]{96}$/i.test(v.pubkey)) throw new Error("Invalid validator public key");
+          const key = v.pubkey.toLowerCase();
+          if (pubkeys.has(key)) throw new Error("Duplicate validator public key");
+          pubkeys.add(key);
+        }
         if (![32, 2048].includes(v.maxEffectiveETH)) throw new Error("Invalid validator cap"); num(v.balanceETH, 0, v.maxEffectiveETH, "validator balance");
       }
     }

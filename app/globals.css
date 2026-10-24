@@ -2067,3 +2067,6 @@ p {
     width: 160px;
   }
 }
+
+/* Shared dashboard navigation and asynchronous section links. */
+.home-link{display:inline-flex;align-items:center;justify-content:center;gap:5px;flex-shrink:0;height:32px;padding:0 8px;margin-right:2px;border:1px solid var(--line);border-radius:6px;color:var(--muted);text-decoration:none;font-size:10px;transition:background .2s,color .2s}.home-link:hover{background:var(--green-soft);color:var(--green)}[id=members],[id=buffer],[id=withdrawal-queue],[id=transactions],[id=guardians],[id=balances],[id=activity],[id=scenario],[id=reports],[id=queue],[id=limits],[id=coverage]{scroll-margin-top:110px}@media(max-width:1200px){.home-link>span{display:none}}@media(prefers-reduced-motion:reduce){.home-link{transition:none}}

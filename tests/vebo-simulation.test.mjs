@@ -60,6 +60,21 @@ test('individual balances, caps, and indexes override aggregate defaults',()=>{
  const r=simulateExits(scenario([op(0,999,2,{validatorData:[{index:20,balanceETH:10,maxEffectiveETH:2048},{index:10,balanceETH:16,maxEffectiveETH:32}]})],{demandETH:26,maxExitETH:2080}))[0];
  assert.deepEqual(r.steps.map(s=>s.winner.validator.index),[10,20]);assert.equal(r.exitETH,26);assert.equal(r.budgetETH,2080);
 });
+test('real public keys survive validation, sorting, edits and JSON export/import',()=>{
+ const keyA='0x'+'ab'.repeat(48),keyB='0x'+'cd'.repeat(48);
+ const s=scenario([op(0,999,2,{validatorData:[{index:20,pubkey:keyB,balanceETH:32,maxEffectiveETH:32},{index:10,pubkey:keyA,balanceETH:32,maxEffectiveETH:32}]})],{demandETH:64});
+ const imported=validateScenario(JSON.parse(JSON.stringify(s)));
+ imported.operators[0].weight=12345;
+ imported.operators[0].mode='force';imported.operators[0].target=0;
+ const selected=simulateExits(imported)[0].steps.map(step=>step.winner.validator);
+ assert.deepEqual(selected.map(v=>[v.index,v.pubkey]),[[10,keyA],[20,keyB]]);
+});
+test('rejects malformed or repeated public keys across different validator indexes',()=>{
+ const key='0x'+'ab'.repeat(48);
+ const pool=pubkey=>[{index:10,pubkey,balanceETH:32,maxEffectiveETH:32}];
+ assert.throws(()=>validateScenario(scenario([op(0,0,1,{validatorData:pool('0x1234')})])),/public key/);
+ assert.throws(()=>validateScenario(scenario([op(0,0,1,{validatorData:pool(key)}),op(1,0,1,{validatorData:[{...pool(key.toUpperCase().replace('0X','0x'))[0],index:20}]})])),/Duplicate validator public key/);
+});
 test('MetaRegistry linked stake and weight shift both sides of the group',()=>{
  const s=scenario([op(0,1,10),op(1,100,10),{...op(0,200,2),id:'4:0',moduleId:4,weight:100}],{modules:[{id:1,name:'CM1',exitShareBps:10000},{id:4,name:'CM2',exitShareBps:10000}],groups:[{name:'linked',external:['1:0'],internal:[{operatorId:'4:0',shareBps:10000}]}],demandETH:64});
  const r=simulateExits(s)[0];assert.equal(r.steps[0].winner.operatorId,'1:0');assert.equal(r.steps[0].winner.stakeETH,384);assert.equal(r.steps[0].winner.targetStakeETH,352);

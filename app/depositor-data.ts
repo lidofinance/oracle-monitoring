@@ -133,3 +133,23 @@ export function unbufferedAmount(logs: { address: string; topics: readonly strin
   }
   return found ? formatEther(total) : null;
 }
+
+/** Finalization IDs are contiguous. A successful but incomplete log response
+ * must not be labelled complete; reconcile it against both boundary states. */
+export function finalizationHistoryComplete(events: Pick<WithdrawalFinalization, "firstRequestId" | "lastRequestId">[], before: string, after: string): boolean {
+  try {
+    if (!/^\d+$/.test(before) || !/^\d+$/.test(after)) return false;
+    const start = BigInt(before), end = BigInt(after);
+    if (end < start) return false;
+    const ordered = events.map(e => {
+      if (!/^\d+$/.test(e.firstRequestId) || !/^\d+$/.test(e.lastRequestId)) throw Error("Invalid finalization ID");
+      return { first: BigInt(e.firstRequestId), last: BigInt(e.lastRequestId) };
+    }).sort((a,b) => a.first < b.first ? -1 : a.first > b.first ? 1 : 0);
+    let cursor = start;
+    for (const event of ordered) {
+      if (event.first !== cursor + 1n || event.last < event.first || event.last > end) return false;
+      cursor = event.last;
+    }
+    return cursor === end;
+  } catch { return false; }
+}

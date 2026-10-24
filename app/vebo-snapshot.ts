@@ -1,11 +1,12 @@
 import { Interface, formatEther } from "ethers";
-import { serverRpcs, parseRpcList } from "./rpc-config";
+import { serverRpcs } from "./rpc-server";
+import { parseRpcList } from "./rpc-config";
 import routerAbi from "./vebo-stakingrouter-abi";
 import sanityAbi from "./vebo-oraclereportsanitychecker-abi";
 import metaAbi from "./vebo-metaregistry-abi";
 import { exampleScenario, type ExitScenario, type SimGroup, type SimOperator } from "./vebo-simulation";
 import { validPendingDeposit } from "./vebo-deposit-signature";
-export type SnapshotMeta = { network: "mainnet"|"hoodi"; block: number; blockHash: string; refSlot: number; stateRoot: string; timestamp: number; keysApi: string; validators: number; excluded: number; pending: number; groups: number; warnings: string[]; source: "live"; reference: "frame"|"finalized" };
+export type SnapshotMeta = { network: "mainnet"|"hoodi"; block: number; blockHash: string; refSlot: number; stateRoot: string; timestamp: number; keysApi: string; keyDataVersion: 1; validators: number; excluded: number; pending: number; groups: number; warnings: string[]; source: "live"; reference: "frame"|"finalized" };
 export type VeboSnapshot = { scenario: ExitScenario; meta: SnapshotMeta };
 type Network = ExitScenario["network"];
 type BeaconValidator = { index: string; balance: string; validator: { pubkey: string; withdrawal_credentials: string; effective_balance: string; slashed: boolean; exit_epoch: string; withdrawable_epoch: string } };
@@ -148,7 +149,7 @@ export async function buildVeboSnapshot(network:Network, progress:(message:strin
       // Count principal once: pending requests and scheduled exits, never exited
       // zero-balance validators or consolidation sources.
       if(!sources.has(Number(v.index)) && (requested || isOnExit) && Number(v.balance)>0)incomingETH+=predictable;
-    } else link.operator.validatorData!.push({index:Number(v.index),balanceETH:predictable,maxEffectiveETH:cap});
+    } else link.operator.validatorData!.push({index:Number(v.index),pubkey:key,balanceETH:predictable,maxEffectiveETH:cap});
   }
   // Every used/deposited key must reconcile, including registered and pending.
   for(const op of operators)if(op.validators+op.pending!==depositedById.get(op.id))throw Error(`Validator reconciliation failed for ${op.id}`);
@@ -157,5 +158,5 @@ export async function buildVeboSnapshot(network:Network, progress:(message:strin
   Object.assign(scenario,{demandETH:Number(formatEther(demand)),availableETH:Number(formatEther(BigInt(balances[0])+BigInt(balances[1])+BigInt(reserve))),incomingETH,rewardsETH:0,depositLockETH:0,growthETH:0,maxRequests:500,maxExitETH:Number(limits.maxBalanceExitRequestedPerReportInEth),frameHours:Number(frameConfig.epochsPerFrame)*Number(chainConfig.slotsPerEpoch)*secondsPerSlot/3600,
     modules:modules.map(m=>({id:Number(m.id),name:m.name,exitShareBps:Number(m.priorityExitShareThreshold)})),operators,groups});
   warnings.push("Queue uses real validator indexes, predictable balances, recent exit requests and MetaRegistry at the reference state. Funding timing is a scenario: rewards and deposit lock start at zero; incoming principal is not a sweep/churn forecast. Later reports assume the same snapshot minus earlier simulated requests, with no new deposits or weight updates.");
-  return {scenario,meta:{network,block:blockNumber,blockHash:payload.block_hash,refSlot,stateRoot,timestamp,keysApi:cfg.kapi,reference,validators:allKeys.length,excluded,pending:operators.reduce((n,o)=>n+o.pending,0),groups:groups.length,warnings,source:"live"}};
+  return {scenario,meta:{network,block:blockNumber,blockHash:payload.block_hash,refSlot,stateRoot,timestamp,keysApi:cfg.kapi,keyDataVersion:1,reference,validators:allKeys.length,excluded,pending:operators.reduce((n,o)=>n+o.pending,0),groups:groups.length,warnings,source:"live"}};
 }

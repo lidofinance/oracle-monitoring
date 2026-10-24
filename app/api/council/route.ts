@@ -1,3 +1,4 @@
+import { withRpcSelection } from "../../rpc-server";
 import { NextRequest, NextResponse } from "next/server";
 import { Interface, formatEther } from "ethers";
 import {
@@ -5,7 +6,8 @@ import {
   COUNCIL_NETWORKS, councilNetwork, parseCouncilBus, decodeCouncilDsm, CouncilStatistics,
   type CouncilNetwork, type CouncilChain, type CouncilKind, type CouncilLog, type CouncilGuardian, type CouncilSnapshot, type CouncilActivity, type CouncilEvent, type CouncilHead,
 } from "../../council-data";
-import { serverRpcs, parseRpcList } from "../../rpc-config";
+import { serverRpcs, rpcCacheKey } from "../../rpc-server";
+import { parseRpcList } from "../../rpc-config";
 import { blockAtOrBefore } from "../../depositor-history";
 
 const hex = (n: number) => `0x${n.toString(16)}`;
@@ -78,10 +80,10 @@ class Chain {
   }
 }
 
-const summaryCaches = new Map<CouncilNetwork, { expires: number; promise: Promise<CouncilSnapshot> }>();
-const activityCaches = new Map<CouncilNetwork, { expires: number; promise: Promise<CouncilActivity>; dsm: string; members: string }>();
+const summaryCaches = new Map<string, { expires: number; promise: Promise<CouncilSnapshot> }>();
+const activityCaches = new Map<string, { expires: number; promise: Promise<CouncilActivity>; dsm: string; members: string }>();
 type RawMessage = { log: CouncilLog; event: CouncilEvent };
-const busHistoryCaches = new Map<CouncilNetwork, {
+const busHistoryCaches = new Map<string, {
   key: string; stats: CouncilStatistics; heads: Partial<Record<CouncilChain, CouncilHead>>;
   recent: Record<string, RawMessage[]>; latestRaw: Map<string, RawMessage>;
 }>();
@@ -137,11 +139,11 @@ async function loadSnapshot(network: CouncilNetwork): Promise<CouncilSnapshot> {
   return { network, updatedAt: Math.floor(Date.now() / 1000), dsm, quorum: Number(quorum), paused: Boolean(paused), guardians, heads, lastDeposit, pauseValidityBlocks: validity === null ? null : Number(validity), maxOperatorsPerUnvet: maxOperators === null ? null : Number(maxOperators), warnings: [...new Set(warnings)] };
 }
 function snapshot(network: CouncilNetwork) {
-  let cache = summaryCaches.get(network);
+  let cache = summaryCaches.get(rpcCacheKey(network));
   if (!cache || cache.expires < Date.now()) {
     const promise = loadSnapshot(network); cache = { expires: Date.now() + 60_000, promise };
-    summaryCaches.set(network, cache);
-    void promise.catch(() => { if (summaryCaches.get(network)?.promise === promise) summaryCaches.delete(network); });
+    summaryCaches.set(rpcCacheKey(network), cache);
+    void promise.catch(() => { if (summaryCaches.get(rpcCacheKey(network))?.promise === promise) summaryCaches.delete(rpcCacheKey(network)); });
   }
   return cache.promise;
 }
@@ -207,7 +209,7 @@ async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
   }
   if (!aliasesComplete) warnings.push("Some delegate-rotation history is unavailable; historical message attribution may be incomplete.");
   const cacheKey = `${from}:${state.dsm}:${state.guardians.map(g => `${g.address}:${g.wallet}`).join(",")}`;
-  const busHistoryCache = busHistoryCaches.get(network);
+  const busHistoryCache = busHistoryCaches.get(rpcCacheKey(network));
   const previous = busHistoryCache?.key === cacheKey && now >= busHistoryCache.stats.to && config.busChains.every(chain => state.heads[chain] && busHistoryCache!.heads[chain] && state.heads[chain]!.block >= busHistoryCache!.heads[chain]!.block) ? busHistoryCache : undefined;
   const scannedHeads = structuredClone(state.heads);
   const stats = new CouncilStatistics(state.guardians, now);
@@ -270,7 +272,7 @@ async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
   // Keep only a complete bus checkpoint. A failed tail is retried from the
   // previous complete head, without double-counting partially loaded ranges.
   // A new UTC window or delegate rotation automatically starts a fresh scan.
-  if (config.busChains.every(chain => coverage[chain])) busHistoryCaches.set(network, { key: cacheKey, stats: Object.assign(new CouncilStatistics(state.guardians, now), structuredClone(stats)), heads: scannedHeads, recent, latestRaw });
+  if (config.busChains.every(chain => coverage[chain])) busHistoryCaches.set(rpcCacheKey(network), { key: cacheKey, stats: Object.assign(new CouncilStatistics(state.guardians, now), structuredClone(stats)), heads: scannedHeads, recent, latestRaw });
   const dsmTopics = ["DepositsPaused", "DepositsUnpaused", "LastDepositBlockChanged"].map(name => COUNCIL_DSM.getEvent(name)!.topicHash);
   const [logs, index] = await Promise.all([
     execution.logs(state.dsm, [dsmTopics], first, head.block),
@@ -313,23 +315,25 @@ async function loadActivity(state: CouncilSnapshot): Promise<CouncilActivity> {
   return { network, ...stats.finish(events), updatedAt: Math.floor(Date.now() / 1000), coverage, dsmHistoryComplete: logs.complete && index.complete && detailsComplete, warnings: [...new Set(warnings)] };
 }
 
-export async function GET(request: NextRequest) {
+async function handleGet(request: NextRequest) {
   const network = councilNetwork(request.nextUrl.searchParams.get("network"));
   if (!network) return NextResponse.json({ error: "Unknown Council network" }, { status: 400 });
   try {
     const state = await snapshot(network);
-    let activityCache = activityCaches.get(network);
+    let activityCache = activityCaches.get(rpcCacheKey(network));
     if (request.nextUrl.searchParams.get("section") !== "activity") return NextResponse.json(state, { headers: { "Cache-Control": "no-store" } });
     const members = state.guardians.map(g => `${g.address}:${g.wallet}`).join(",");
     if (!activityCache || activityCache.expires < Date.now() || activityCache.dsm !== state.dsm || activityCache.members !== members) {
       const promise = loadActivity(state); activityCache = { promise, expires: Date.now() + 300_000, dsm: state.dsm, members };
-      activityCaches.set(network, activityCache);
-      void promise.catch(() => { if (activityCaches.get(network)?.promise === promise) activityCaches.delete(network); });
+      activityCaches.set(rpcCacheKey(network), activityCache);
+      void promise.catch(() => { if (activityCaches.get(rpcCacheKey(network))?.promise === promise) activityCaches.delete(rpcCacheKey(network)); });
     }
     const data = await activityCache.promise;
-    if (data.warnings.length) activityCache!.expires = Math.min(activityCache!.expires, Date.now() + 60_000);
+    if (data.warnings.length) activityCache!.expires = Math.min(activityCache!.expires, Date.now() + 15_000);
     return NextResponse.json(data, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return NextResponse.json({ error: "Council chain data could not be read. Try Refresh; the public RPC or transaction index may be temporarily unavailable." }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 }
+
+export async function GET(request: NextRequest) { return withRpcSelection(request, handleGet); }

@@ -11,7 +11,7 @@
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
     "test": "npm run test:unit && npm run build && node --experimental-strip-types --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "test:unit": "node --experimental-strip-types --test tests/filters.test.mjs tests/oracle-modules.test.mjs tests/oracle-consensus.test.mjs tests/oracle-reports.test.mjs tests/rpc-config.test.mjs tests/depositor.test.mjs tests/council.test.mjs tests/vebo-simulation.test.mjs",
+    "test:unit": "node --experimental-strip-types --test tests/filters.test.mjs tests/oracle-modules.test.mjs tests/oracle-consensus.test.mjs tests/oracle-reports.test.mjs tests/rpc-config.test.mjs tests/depositor.test.mjs tests/lido-exit-balances.test.mjs tests/ethereum-exit-queue.test.mjs tests/exit-withdrawal-forecast.test.mjs tests/depositor-liquidity.test.mjs tests/withdrawals.test.mjs tests/council.test.mjs tests/vebo-simulation.test.mjs tests/vebo-cache.test.mjs tests/consolidation.test.mjs tests/rpc-selection.test.mjs tests/loading-state.test.mjs tests/request-retry.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

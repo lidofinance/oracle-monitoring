@@ -1,0 +1,49 @@
+/* Lining digits share a baseline; tabular digits keep live values steady. */
+body {
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+:root :is(
+  .metric strong, .reports-count strong, .vebo-breakdown > header > strong,
+  .dep-metric strong, .dep-operation > strong, .dep-volume-summary strong,
+  .dep-wallet strong, .dep-numeric, .dep-queue-metrics strong,
+  .dep-forecast-grid strong, .dep-forecast-projection > b,
+  .dep-liquidity-total, .dep-liquidity-side dd, .dep-liquidity-result strong,
+  .withdrawal-bars strong, .cw-metric > strong, .cw-wallet > strong,
+  .cw-action-stats strong, .cw-heatmap-row > button,
+  .cs-metric > strong, .cs-next-body > strong, .cs-participation-body > strong,
+  .cs-limit-stats strong, .vs-metrics article > strong, .vs-op-facts strong
+) {
+  font-family: var(--font-geist-sans), Arial, sans-serif;
+  font-variant-numeric: lining-nums tabular-nums;
+  letter-spacing: -0.025em;
+}
+
+:root :is(table, input[type="number"], svg text) {
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+/* Size the longest ETH total against its card, including the unit. */
+:root .dep-metric {
+  container-type: inline-size;
+}
+
+:root .dep-metric strong {
+  font-size: min(34px, 11cqi);
+  white-space: nowrap;
+  overflow-wrap: normal;
+  line-height: 1.25;
+}
+
+:root :is(.dep-queue-metrics strong, .dep-forecast-grid strong, .dep-liquidity-total,
+  .dep-volume-summary strong, .dep-wallet strong, .cs-metric > strong,
+  .cs-participation-body > strong, .vs-metrics article > strong) {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+@media (max-width: 540px) {
+  :root .dep-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
