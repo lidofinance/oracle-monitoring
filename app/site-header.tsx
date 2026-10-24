@@ -19,15 +19,15 @@ export default function SiteHeader({ network, title, subtitle, icon, actions, na
   home?: boolean;
 }) {
   return <header className="site-header">
-    <div className="site-header-main">
+    <div className={`site-header-main${navigation ? " with-navigation" : ""}`}>
       <div className="site-header-brand">
         <HomeLink network={network} current={home} />
         <span className="site-header-icon" aria-hidden="true">{icon}</span>
         <div className="site-header-title"><strong>{title}</strong><span>{subtitle}</span></div>
       </div>
+      {navigation && <div className="site-header-navigation">{navigation}</div>}
       <div className="site-header-actions"><LoadingStatus network={network} home={home}/>{actions}</div>
     </div>
-    {navigation && <div className="site-header-navigation">{navigation}</div>}
   </header>;
 }
 

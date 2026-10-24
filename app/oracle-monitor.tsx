@@ -1064,28 +1064,6 @@ function CopyButton({
   );
 }
 
-function RouteButton({
-  value,
-  onCopied,
-}: {
-  value: string;
-  onCopied: () => void;
-}) {
-  return (
-    <button
-      className="route-button"
-      type="button"
-      onClick={async () => {
-        await navigator.clipboard.writeText(value);
-        onCopied();
-      }}
-    >
-      <Copy size={15} />
-      URL
-    </button>
-  );
-}
-
 function JsonModal({
   message,
   onClose,
@@ -1494,11 +1472,6 @@ export default function OracleMonitor() {
     ],
   );
 
-  const currentRouteUrl =
-    typeof window === "undefined"
-      ? routeFor(view)
-      : new URL(routeFor(view), window.location.origin).toString();
-
   // The URL is the source of truth for the view, network and filters. The
   // state is adjusted during render when the route changes, so the first
   // render of a new route already shows the right screen.
@@ -1874,7 +1847,6 @@ export default function OracleMonitor() {
           <span className="updated">
             {updatedAt ? `Updated ${updatedAt.toLocaleTimeString()}` : "Live RPC"}
           </span>
-          <RouteButton value={currentRouteUrl} onCopied={copied} />
           <button
             className="refresh-button"
             type="button"
