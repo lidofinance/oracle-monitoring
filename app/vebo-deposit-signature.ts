@@ -1,4 +1,4 @@
-import { bls12_381 as bls } from "@noble/curves/bls12-381";
+import { bls12_381 as bls } from "@noble/curves/bls12-381.js";
 import { concat, getBytes, sha256 } from "ethers";
 const zero = new Uint8Array(32);
 const hash = (a: Uint8Array, b: Uint8Array) => getBytes(sha256(concat([a,b])));
@@ -14,7 +14,8 @@ export function validPendingDeposit(d: { pubkey: string; withdrawal_credentials:
     const forkChunk=concatBytes(fork,new Uint8Array(28)), forkRoot=hash(forkChunk,zero);
     const domain=concatBytes(new Uint8Array([3,0,0,0]),forkRoot.slice(0,28));
     const signingRoot=hash(message,domain);
-    return bls.verify(signature,bls.G2.ProjectivePoint.fromAffine(bls.G2.hashToCurve(signingRoot,{DST:"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_"}).toAffine()),pubkey);
+    const signatures=bls.longSignatures;
+    return signatures.verify(signature,signatures.hash(signingRoot,"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_"),pubkey);
   } catch {return false;}
 }
 function concatBytes(a: Uint8Array,b: Uint8Array) {const out=new Uint8Array(a.length+b.length);out.set(a);out.set(b,a.length);return out;}

@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { bls12_381 as bls } from '@noble/curves/bls12-381';
-import { concat, getBytes, sha256 } from 'ethers';
 import { exampleScenario, simulateExits, validateScenario } from '../app/vebo-simulation.ts';
 import { validPendingDeposit } from '../app/vebo-deposit-signature.ts';
 const op=(id,index,count=10,extra={})=>({id:`1:${id}`,moduleId:1,name:`Operator ${id}`,validators:count,excluded:0,pending:0,balanceETH:32,credential:'0x01',weight:100,mode:'none',target:0,indexStart:index,...extra});
@@ -90,14 +88,14 @@ test('scenario validation rejects ambiguous validator indexes and invalid groups
  assert.throws(()=>validateScenario(scenario([op(0,1,1,{validatorData:[{index:1,balanceETH:33,maxEffectiveETH:32}]})])),/balance/);
  assert.doesNotThrow(()=>validateScenario(exampleScenario()));
 });
-test('BLS pending deposit verification uses the Ethereum POP domain and rejects tampering',()=>{
- const z=new Uint8Array(32),hash=(a,b)=>getBytes(sha256(concat([a,b]))),secret=123n,pk=bls.getPublicKey(secret),wc=getBytes('0x01'+'00'.repeat(31)),amount=new Uint8Array(32);new DataView(amount.buffer).setBigUint64(0,32000000000n,true);
- const pkr=hash(pk.slice(0,32),getBytes(concat([pk.slice(32),new Uint8Array(16)]))),msg=hash(hash(pkr,wc),hash(amount,z));
- const domain=getBytes(concat([new Uint8Array([3,0,0,0]),hash(z,z).slice(0,28)])),root=hash(msg,domain);
- const point=bls.G2.ProjectivePoint.fromAffine(bls.G2.hashToCurve(root,{DST:'BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_'}).toAffine());
- const signature=bls.Signature.toRawBytes(bls.sign(point,secret));const hex=b=>'0x'+Buffer.from(b).toString('hex');
- const d={pubkey:hex(pk),withdrawal_credentials:hex(wc),amount:'32000000000',signature:hex(signature)};
- assert.equal(validPendingDeposit(d,'0x00000000'),true);assert.equal(validPendingDeposit({...d,amount:'32000000001'},'0x00000000'),false);assert.equal(validPendingDeposit(d,'0x10000910'),false);
+test('BLS pending deposits preserve the pre-upgrade Ethereum POP signature vector',()=>{
+ // Generated with noble-curves 1.2.0 before the v2 migration (public test key 123).
+ const d={"pubkey":"0xa0ec3e71a719a25208adc97106b122809210faf45a17db24f10ffb1ac014fac1ab95a4a1967e55b185d4df622685b9e8","withdrawal_credentials":"0x0100000000000000000000000000000000000000000000000000000000000000","amount":"32000000000","signature":"0x9397122d755e473aac5a4bbe1406a24b999f0a3f23e5ba33a433769eeda13e40febe63382a17d41097d3b8eb48cbde7b01f3d9b82cbb71c416f22f96405e56670db71916b9a45a7503ac2aa9e7b771eb62790c6a6a9577b74d27b915f22f2878"};
+ assert.equal(validPendingDeposit(d,'0x00000000'),true);
+ assert.equal(validPendingDeposit({...d,amount:'32000000001'},'0x00000000'),false);
+ assert.equal(validPendingDeposit(d,'0x10000910'),false);
+ assert.equal(validPendingDeposit({...d,signature:'0x'+'00'.repeat(96)},'0x00000000'),false);
+ assert.equal(validPendingDeposit({...d,pubkey:'0x'+'00'.repeat(48)},'0x00000000'),false);
 });
 
 test('removed empty MetaRegistry group slots do not invalidate or alter selection',()=>{

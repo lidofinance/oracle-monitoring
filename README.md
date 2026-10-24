@@ -101,7 +101,7 @@ docker run --rm -p 3000:3000 lidofinance/oracle-monitoring:local
 
 ## Local development
 
-Requires Node.js 22.13 or newer.
+Requires Node.js 26.12.1 or newer (`nvm use` reads `.nvmrc`).
 
 ```bash
 npm install
@@ -163,7 +163,7 @@ app/rpc-config.ts    RPC endpoint defaults and environment overrides
 tests/               Node test runner suites
 worker/              Cloudflare Workers entry (serves the built app)
 .github/             CI workflow, Dependabot and code owners
-Dockerfile           Production image (Node 22)
+Dockerfile           Production image (Node 26)
 docker-compose.yml   Local run with Docker Compose
 ```
 
@@ -447,3 +447,7 @@ The network bar on Home and every dashboard has an execution-layer RPC picker. A
 The shared header shows an animated Loading data indicator while any visible collector, background polling job or simulator calculation is pending. Loaded means the current page has no pending work; Partial data means loading has finished with an unavailable source. Hovering the status lists the outstanding or unavailable datasets.
 
 Read-only API requests automatically retry temporary network failures and HTTP 408/425/429/500/502/503/504 responses up to four attempts with backoff and Retry-After support. Cancellation stops outstanding attempts. Exhausted or partial page loads retry after 15/30/60/120 seconds without clearing existing data. Failed background jobs expire sooner; successful forecast components are reused while only failed components recover. Editing a simulator scenario cancels an outstanding snapshot retry.
+
+Dependency tooling uses the TypeScript 7 compiler alongside the official TypeScript 6 API compatibility package required by typescript-eslint. ESLint stays on the latest compatible 9.x release until the Next.js React, accessibility and import plugins support ESLint 10.
+
+The default build targets the self-hosted Node runtime. Use `npm run build:cloudflare` explicitly for the Workers adapter. Compatible security patches for Undici and fflate are overridden until upstream packages update their pins.

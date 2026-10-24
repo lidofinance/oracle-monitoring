@@ -6,23 +6,14 @@ import path from "node:path";
 import { exampleScenario } from "../app/vebo-simulation.ts";
 
 async function render(path = "/", extraHeaders = {}) {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
+  const entryUrl = new URL("../dist/server/index.js", import.meta.url);
+  entryUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
+  const { default: handler } = await import(entryUrl.href);
 
-  return worker.fetch(
+  return handler(
     new Request(`http://localhost${path}`, {
       headers: { accept: "text/html", ...extraHeaders },
     }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
   );
 }
 

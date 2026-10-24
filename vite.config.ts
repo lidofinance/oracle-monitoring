@@ -8,19 +8,21 @@ export default defineConfig(async () => {
   process.env.WRANGLER_LOG_PATH ??= ".wrangler/logs";
   process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
 
-  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
-  const { cloudflare } = await import("@cloudflare/vite-plugin");
+  // The self-hosted service runs in Node. Workers builds need a separate
+  // target because the Cloudflare adapter now emits runtime-only imports.
+  const workers = process.env.MONITOR_BUILD_TARGET === "cloudflare";
+  const { cloudflare } = workers ? await import("@cloudflare/vite-plugin") : { cloudflare: null };
 
   return {
     plugins: [
       vinext(),
-      cloudflare({
+      ...(cloudflare ? [cloudflare({
         viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
         config: {
           main: "./worker/index.ts",
           compatibility_flags: ["nodejs_compat"],
         },
-      }),
+      })] : []),
     ],
   };
 });
