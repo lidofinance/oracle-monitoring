@@ -1,11 +1,10 @@
 import { AbiCoder, Interface, decodeBytes32String } from "ethers";
 
 export type CouncilNetwork = "mainnet" | "hoodi";
-export type CouncilChain = "ethereum" | "gnosis" | "polygon" | "hoodi" | "chiado";
+export type CouncilChain = "ethereum" | "gnosis" | "polygon" | "hoodi";
 export type CouncilKind = "deposit" | "ping" | "pause" | "unvet" | "resume";
 export const COUNCIL_CHAINS = {
   hoodi: { name: "Hoodi", chainId: 560048, symbol: "ETH", explorer: "https://hoodi.etherscan.io", seconds: 12 },
-  chiado: { name: "Chiado", chainId: 10200, symbol: "xDAI", explorer: "https://gnosis-chiado.blockscout.com", seconds: 5 },
   ethereum: { name: "Ethereum", chainId: 1, symbol: "ETH", explorer: "https://etherscan.io", seconds: 12 },
   gnosis: { name: "Gnosis", chainId: 100, symbol: "xDAI", explorer: "https://gnosis.blockscout.com", seconds: 5 },
   polygon: { name: "Polygon", chainId: 137, symbol: "POL", explorer: "https://polygonscan.com", seconds: 2 },
@@ -37,7 +36,7 @@ export const COUNCIL_NETWORKS: Record<CouncilNetwork, {
   busChains: CouncilChain[]; indexer: string; labels: typeof COUNCIL_LABELS; reference: string;
 }> = {
   mainnet: { name: "Mainnet", locator: COUNCIL_LOCATOR, executionChain: "ethereum", balanceChains: ["ethereum", "gnosis", "polygon"], busChains: ["gnosis", "polygon"], indexer: "https://eth.blockscout.com", labels: COUNCIL_LABELS, reference: COUNCIL_LABEL_SOURCE },
-  hoodi: { name: "Hoodi", locator: "0xe2EF9536DAAAEBFf5b1c130957AB3E80056b06D8", executionChain: "hoodi", balanceChains: ["hoodi", "chiado"], busChains: ["chiado"], indexer: "https://eth-hoodi.blockscout.com", labels: COUNCIL_HOODI_LABELS, reference: "https://docs.lido.fi/deployed-contracts/hoodi/" },
+  hoodi: { name: "Hoodi", locator: "0xe2EF9536DAAAEBFf5b1c130957AB3E80056b06D8", executionChain: "hoodi", balanceChains: ["hoodi", "gnosis"], busChains: ["gnosis"], indexer: "https://eth-hoodi.blockscout.com", labels: COUNCIL_HOODI_LABELS, reference: "https://docs.lido.fi/deployed-contracts/hoodi/" },
 };
 export function councilNetwork(value: string | null): CouncilNetwork | null {
   return value === null || value === "mainnet" ? "mainnet" : value === "hoodi" ? "hoodi" : null;
@@ -82,6 +81,7 @@ export type CouncilGuardian = {
   address: string; name: string; wallet: string | null; owner: string | null;
   terminated: boolean | null; pendingDelegate: string | null; pendingFrom: number | null;
   legacy: string | null; balances: Partial<Record<CouncilChain, string | null>>;
+  legacyBalances: Partial<Record<CouncilChain, string | null>>;
 };
 export type CouncilHead = { block: number; timestamp: number };
 export type CouncilSnapshot = {

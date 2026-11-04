@@ -3,8 +3,8 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 One-page onchain operations console for the Lido Oracle committees on Ethereum
-Mainnet and Hoodi. It reads public RPC endpoints directly and needs no API keys
-or database.
+Mainnet and Hoodi. Its server reads public RPC endpoints and shares ten-minute
+snapshots across visitors; no API keys or database are required.
 
 ## What it shows
 
@@ -40,8 +40,11 @@ The API at `/api/depositor?network=mainnet` (or `hoodi`) resolves protocol
 contracts from the canonical Lido Locator and discovers every current
 `TOP_UP_ROLE` holder from the gateway. It reads each EDF delegate live, so
 key rotations do not require editing addresses. All balances and gates use
-one block two blocks behind the head. Snapshots are cached for one minute;
-activity and historical samples are cached for five minutes.
+one block two blocks behind the head. Snapshots, activity and historical
+samples are shared for ten minutes per network and selected RPC. The reader
+paces requests per endpoint, permits at most two in flight, and retries
+temporary failures with backoff and `Retry-After` support. Historical timestamp
+failures leave chart gaps and a warning without discarding valid current balances.
 
 Activity covers approximately seven days (50,400 blocks), with at most 120
 latest operations. ETH moved comes from Lido’s `Unbuffered` events rather
@@ -129,10 +132,10 @@ set in `.env` (see `.env.example`) or passed to Docker Compose.
 
 | Variable | Used by | Purpose |
 | --- | --- | --- |
-| `NEXT_PUBLIC_MAINNET_RPC_URLS` | browser, build time | Comma-separated Mainnet RPC URLs for membership, balances and DataBus reads |
-| `NEXT_PUBLIC_HOODI_RPC_URLS` | browser, build time | Same for Hoodi (DataBus lives on Hoodi, so this also serves Mainnet telemetry) |
-| `MAINNET_RPC_URLS` | report API, runtime | Mainnet RPC URLs for `eth_getLogs` discovery of report transactions |
-| `HOODI_RPC_URLS` | report API, runtime | Same for Hoodi |
+| `NEXT_PUBLIC_MAINNET_RPC_URLS` | browser, build time | Legacy browser RPC defaults; snapshot collection uses runtime server RPCs |
+| `NEXT_PUBLIC_HOODI_RPC_URLS` | browser, build time | Legacy Hoodi browser RPC defaults |
+| `MAINNET_RPC_URLS` | server, runtime | Mainnet membership, balances and report discovery RPCs |
+| `HOODI_RPC_URLS` | server, runtime | Hoodi membership and DataBus RPCs, including Mainnet telemetry |
 | `ETHERSCAN_API_KEY` | report API, runtime | Optional Etherscan API v2 key; adds the receivers' direct and internal transactions to the discovery |
 | `PORT` | server | HTTP port, `3000` by default |
 
@@ -182,7 +185,9 @@ Distributed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
 through Lido Locator and resolves each active EDF delegate, owner and pending
 key. The balance cards show each delegate's native ETH, xDAI and POL balances
 on Ethereum, Gnosis and Polygon respectively. Hoodi shows testnet ETH and
-Chiado xDAI funding, with the Hoodi DSM and the documented Chiado DataBus.
+Gnosis mainnet xDAI funding, with the Hoodi DSM and DataBus messages on Gnosis
+(chain ID 100). Hoodi Council no longer uses Chiado. Active delegate balances
+and published pre-EDF wallet balances are shown separately.
 Balances are pinned to confirmed chain heads.
 The page links to the contracts and network-specific wallet histories.
 
@@ -201,7 +206,7 @@ rotation keys and pre-EDF guardian keys are included and marked as other keys; c
 recency never falls back to a former-key heartbeat. Operator labels are
 sourced from the linked EDF governance migration, not used to determine
 membership. Messages are observed broadcasts, not verified signatures.
-RabbitMQ messages and daemon process health are outside this public view.
+Daemon process health is outside this public view.
 
 DSM pause/deposit events are combined with Blockscout's direct and internal
 transaction index. Each candidate is checked against the selected execution network's RPC calldata
@@ -215,8 +220,9 @@ warnings and lower-bound totals. The ledger retains up to 500 broadcasts and 100
 charts, totals and per-guardian counts use the full loaded window.
 
 Optional `GNOSIS_RPC_URLS` and `POLYGON_RPC_URLS` runtime variables accept
-comma-separated public or private RPC URLs. Ethereum uses `MAINNET_RPC_URLS`, Hoodi uses `HOODI_RPC_URLS`, and
-Chiado accepts `CHIADO_RPC_URLS`.
+comma-separated public or private RPC URLs. Ethereum uses `MAINNET_RPC_URLS`;
+Hoodi execution calls use `HOODI_RPC_URLS`. Both Council tabs use
+`GNOSIS_RPC_URLS` for Gnosis balances and DataBus messages.
 No API keys are required by the default endpoints.
 
 The `/council` page runs in the root-path monitor runtime (port 3012). Include
@@ -451,3 +457,11 @@ Read-only API requests automatically retry temporary network failures and HTTP 4
 Dependency tooling uses the TypeScript 7 compiler alongside the official TypeScript 6 API compatibility package required by typescript-eslint. ESLint stays on the latest compatible 9.x release until the Next.js React, accessibility and import plugins support ESLint 10.
 
 The default build targets the self-hosted Node runtime. Use `npm run build:cloudflare` explicitly for the Workers adapter. Compatible security patches for Undici and fflate are overridden until upstream packages update their pins.
+
+The portal nginx snippet serves `/` directly. The legacy bare `/oracle` and `/oracle/` entry points temporarily redirect to `/?network=mainnet` (or Hoodi when selected), bypassing browsers that cached the former permanent root-to-Oracle redirect. Oracle views use `/oracle/overview`, `/oracle/telemetry` and `/oracle/reports`; the recovery redirects are marked `no-store`.
+
+The shared header includes a light/dark theme toggle. The first visit follows the OS preference; an explicit choice is stored in `lido-watch-theme` and shared across the portal and Oracle routes. The theme initializes in the document head before hydration, works if browser storage is blocked, and synchronizes between tabs.
+
+Oracle overview uses paced, retrying RPC reads with per-endpoint chain-ID validation. Auto fails over during reads as well as initial connection; explicit presets remain exclusive. Malformed upstream responses retry without losing contract revert data, including not-yet-started HashConsensus frames. Per-load wallet and delegation reads are deduplicated, and incomplete DataBus log ranges are flagged in the UI.
+
+Oracle overview loads `/api/oracle-snapshot?network=mainnet&mode=overview` from a shared ten-minute server cache. Collections are deduplicated by both network RPC choices and view mode. Membership is published first, while the loading indicator remains active for telemetry. Overview responses retain only the latest heartbeat, diagnostic and startup per member/module; the complete ledger loads separately with `mode=telemetry`. Auxiliary RPC headers accept only the fixed presets. Pending collections are polled without restarting onchain reads.

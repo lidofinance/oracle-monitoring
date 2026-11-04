@@ -12,6 +12,8 @@ import { readExitQueue } from "../../ethereum-exit-queue";
 import { readLidoExitBalances } from "../../lido-exit-balances";
 import { readExitWithdrawalForecast } from "../../exit-withdrawal-forecast";
 import { readLiquiditySnapshot } from "../../depositor-liquidity";
+import { createRpcReader, RpcReadError } from "../../rpc-read";
+import { DATA_REFRESH_INTERVAL_MS } from "../../refresh-policy";
 
 type Network = "mainnet" | "hoodi";
 type Block = { number: string; timestamp: string };
@@ -27,6 +29,7 @@ const num = (s: string) => Number(BigInt(s));
 const ZERO = "0x0000000000000000000000000000000000000000";
 const snapshots = new Map<string, { expires: number; promise: Promise<DepositorSnapshot> }>();
 const details = new Map<string, { expires: number; promise: Promise<Pick<DepositorSnapshot, "history" | "transactions" | "withdrawals" | "withdrawalsComplete" | "veboRequests" | "veboComplete" | "activityFrom" | "activityTo" | "activityTruncated" | "warnings">> }>();
+const readRpc = createRpcReader();
 
 class Chain {
   network: Network;
@@ -34,19 +37,7 @@ class Chain {
   async rpc<T>(method: string, params: unknown[], preferredOffset = 0): Promise<T> {
     const providers = serverRpcs(this.network).slice(0, 3);
     const ordered = [...providers.slice(preferredOffset), ...providers.slice(0, preferredOffset)];
-    for (const endpoint of ordered) {
-      try {
-        const response = await fetch(endpoint, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-          signal: AbortSignal.timeout(8000), cache: "no-store",
-        });
-        if (!response.ok) continue;
-        const body = await response.json() as { result?: T; error?: unknown };
-        if (!body.error && body.result !== undefined && body.result !== null) return body.result;
-      } catch { /* Try the next configured provider, without exposing endpoint URLs. */ }
-    }
-    throw new Error(`Ethereum ${method} unavailable`);
+    return readRpc<T>(ordered, method, params);
   }
   async call(address: string, abi: Interface, method: string, args: unknown[], block: number) {
     const result = await this.rpc<string>("eth_call", [{ to: address, data: abi.encodeFunctionData(method, args) }, hex(block)]);
@@ -80,7 +71,7 @@ async function wallet(chain: Chain, holder: string, block: number): Promise<Depo
   return { holder, delegate, owner, terminated, balance: balance ? ethAmount(balance) : null, holderBalance: holderBalance ? ethAmount(holderBalance) : null };
 }
 
-async function loadDetails(chain: Chain, block: number, addresses: DepositorSnapshot["addresses"]) {
+async function loadDetails(chain: Chain, block: number, addresses: DepositorSnapshot["addresses"], confirmed: Block) {
   const warnings: string[] = [];
   const from = Math.max(0, block - 7 * 7200);
   // Events identify completed operations independently of the hot key's current
@@ -166,7 +157,13 @@ async function loadDetails(chain: Chain, block: number, addresses: DepositorSnap
       } satisfies DepositorTransaction;
     } catch { warnings.push("Some transaction details could not be loaded."); return null; }
   })).filter((tx): tx is DepositorTransaction => tx !== null);
-  const [start, end] = await Promise.all([chain.block(from), chain.block(block)]);
+  const start = await optional(() => chain.block(from)), end = confirmed;
+  if (!start) {
+    // An unavailable historical block must not discard today's valid balances
+    // or the transactions already collected above.
+    warnings.push("Historical block timestamps are unavailable; buffer history could not be loaded.");
+    return { history: dailySnapshotTimes(num(end.timestamp)).map(timestamp => ({ timestamp, blockTimestamp: null, buffer: null, depositable: null, withdrawalDemand: null })), transactions, withdrawals, withdrawalsComplete, veboRequests, veboComplete, activityFrom: num(end.timestamp) - 7 * 86400, activityTo: block, activityTruncated: ordered.length > limit, warnings: [...new Set(warnings)] };
+  }
   const timed = (value: Block) => ({ number: num(value.number), timestamp: num(value.timestamp) });
   const blocks = new Map<number, Promise<Block>>([[from, Promise.resolve(start)], [block, Promise.resolve(end)]]);
   const readBlock = (number: number) => {
@@ -241,12 +238,11 @@ async function load(network: Network): Promise<DepositorSnapshot> {
   const depositMined = lastDepositBlock ? await optional(() => chain.block(Number(lastDepositBlock))) : null;
   let cached = details.get(rpcCacheKey(network));
   if (!cached || cached.expires < Date.now()) {
-    const promise = loadDetails(chain, block, addresses);
-    cached = { expires: Date.now() + 300_000, promise }; details.set(rpcCacheKey(network), cached);
+    const promise = loadDetails(chain, block, addresses, mined);
+    cached = { expires: Date.now() + DATA_REFRESH_INTERVAL_MS, promise }; details.set(rpcCacheKey(network), cached);
     void promise.catch(() => details.delete(rpcCacheKey(network)));
   }
   const activity = await cached.promise;
-  if (activity.warnings.length) cached.expires = Math.min(cached.expires, Date.now() + 15_000);
   const warnings = [...activity.warnings];
   if ([demand, pendingRequests, claimableEther, lastRequestId, lastFinalizedRequestId, paused, bunker].some((value) => value === null)) warnings.push("Some withdrawal queue information is currently unavailable.");
   if (holderCount === null) warnings.push("Could not discover TOP_UP_ROLE holders from the current gateway.");
@@ -284,15 +280,16 @@ async function handleGet(request: NextRequest) {
   let cached = snapshots.get(rpcCacheKey(requested));
   if (!cached || cached.expires < Date.now()) {
     const promise = load(requested);
-    cached = { expires: Date.now() + 60_000, promise }; snapshots.set(rpcCacheKey(requested), cached);
+    cached = { expires: Date.now() + DATA_REFRESH_INTERVAL_MS, promise }; snapshots.set(rpcCacheKey(requested), cached);
     void promise.catch(() => snapshots.delete(rpcCacheKey(requested)));
   }
   try {
     const snapshot=await cached.promise;
-    if(snapshot.warnings.length)cached.expires=Math.min(cached.expires,Date.now()+15_000);
     return NextResponse.json(snapshot, { headers: { "Cache-Control": "public, max-age=30, s-maxage=60" } });
-  } catch {
-    return NextResponse.json({ error: "Live Ethereum data is temporarily unavailable. Please retry shortly." }, { status: 503, headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    const limited = error instanceof RpcReadError && error.reason === "rate-limit";
+    console.warn("[depositor] snapshot unavailable", { network: requested, rpc: request.headers.get("x-lido-rpc") ?? "auto", method: error instanceof RpcReadError ? error.method : "snapshot", reason: error instanceof RpcReadError ? error.reason : "read-failed" });
+    return NextResponse.json({ error: limited ? "The selected Ethereum RPC is rate limiting requests. Retrying automatically; you can also choose Auto or another RPC." : "Live Ethereum data is temporarily unavailable. Retrying automatically; you can also choose another RPC." }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
 }
 

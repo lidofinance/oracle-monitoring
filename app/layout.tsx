@@ -2,7 +2,9 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { headers } from "next/headers";
 import "./globals.css";
+import "./theme.css";
 import SectionJump from "./section-jump";
+import { THEME_INIT_SCRIPT } from "./theme";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -57,7 +59,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+      </head>
       <body className={`${geistSans.variable} ${geistMono.variable}`}>
         <SectionJump />
         {children}

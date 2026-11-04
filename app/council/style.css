@@ -46,6 +46,9 @@
 .cw-wallet strong small {font-size:9px;color:var(--muted);}
 .cw-wallet>a {display:inline-flex;gap:3px;align-items:center;text-decoration:none;font-size:9px;margin-top:8px;color:var(--muted);}
 .cw-wallet.empty>strong {color:#a55b25;}
+.cw-balance-label,.cw-legacy-balance>span {display:block;font-size:9px;color:var(--muted);margin-bottom:7px;line-height:1.5;}
+.cw-legacy-balance {margin-top:15px;padding-top:12px;border-top:1px dashed var(--line);}
+.cw-legacy-balance>strong {display:block;font-size:14px;font-weight:500;color:var(--ink);margin-bottom:7px;}
 .cw-mobile-label {display:none;}
 .cw-last {display:flex;flex-direction:column;gap:8px;}
 .cw-state {font-size:9px;color:var(--muted);}

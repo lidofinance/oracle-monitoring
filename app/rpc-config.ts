@@ -11,7 +11,7 @@ export const MAINNET_CHAIN_ID = 1;
 export const HOODI_CHAIN_ID = 560_048;
 
 const DEFAULT_BROWSER_RPCS = {
-  mainnet: ["https://ethereum.publicnode.com", "https://eth.llamarpc.com"],
+  mainnet: ["https://ethereum-rpc.publicnode.com", "https://rpc.mevblocker.io", "https://gateway.tenderly.co/public/mainnet"],
   hoodi: [
     "https://rpc.hoodi.ethpandaops.io",
     "https://hoodi.drpc.org",
@@ -20,12 +20,12 @@ const DEFAULT_BROWSER_RPCS = {
 };
 
 // publicnode rejects log queries older than a few thousand blocks and
-// flashbots keeps only recent logs, so they come after mevblocker and tenderly.
+// Archive log support varies. Flashbots' public endpoint rejects eth_call,
+// so it cannot act as a fallback for dashboard state reads.
 const DEFAULT_SERVER_RPCS = {
   mainnet: [
     "https://rpc.mevblocker.io",
     "https://gateway.tenderly.co/public/mainnet",
-    "https://rpc.flashbots.net",
     "https://ethereum-rpc.publicnode.com",
   ],
   hoodi: [

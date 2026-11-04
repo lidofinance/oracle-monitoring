@@ -4,7 +4,8 @@ export type FrameInfo = {
   refSlot: number;
   previousRefSlot: number;
   deadlineSlot: number;
-} | { notStarted: true };
+  epochsPerFrame?: number;
+} | { notStarted: true; epochsPerFrame?: number };
 
 export type VoteState = "current" | "previous" | "missed" | "not-started" | "unknown";
 

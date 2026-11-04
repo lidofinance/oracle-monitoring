@@ -5,14 +5,9 @@ import SiteHeader, { NetworkBar } from "./site-header";
 import { useLoadingTask } from "./loading-status";
 import { useAutoRetry } from "./use-auto-retry";
 import { rpcFetch, readRpcChoiceRaw, subscribeRpcChoice } from "./rpc-client";
-import { parseRpcChoice } from "./rpc-selection";
-import {
-  AbiCoder,
-  Contract,
-  formatEther,
-  JsonRpcProvider,
-  type Log,
-} from "ethers";
+import { parseRpcChoice, RPC_OPTIONS } from "./rpc-selection";
+import type { OracleSnapshotResult } from "./oracle-snapshot-cache";
+import { waitForRetry } from "./request-retry";
 import {
   Activity,
   AlertTriangle,
@@ -44,17 +39,13 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import { CONSENSUS_CONTRACTS } from "./consensus-contracts";
-import { readConsensusFrame, voteStateFor, type FrameInfo } from "./oracle-consensus";
+import { voteStateFor, type FrameInfo } from "./oracle-consensus";
 import { filterWithCounts, parseSelection, toggleSelection } from "./filters";
 import {
   ORACLE_MODULES,
-  ORACLE_STARTUP_TOPIC,
   TELEMETRY_EVENT_KINDS,
   availableModules,
-  moduleFromMessage,
-  parseTelemetrySetup,
-  telemetryEventFromTopic,
+  telemetryReadiness,
   type OracleModule,
   type TelemetryEvent,
 } from "./oracle-modules";
@@ -68,93 +59,11 @@ import {
   type ParsedOracleReport,
   type ReportPhase,
 } from "./oracle-reports";
-import { BROWSER_RPCS, HOODI_CHAIN_ID, MAINNET_CHAIN_ID } from "./rpc-config";
+import { NETWORKS, LABELS, HOLDER_CONTRACTS, DATABUS_EXPLORER, type Holder, type SeatKind, type BusMessage, type Snapshot } from "./oracle-snapshot-data";
 
 type NetworkKey = "mainnet" | "hoodi";
 type ViewKey = "overview" | "telemetry" | "oracle";
 type ModuleKey = OracleModule;
-
-// State of an EDF DelegationContract (LIP-37) read from the chain.
-type DelegationState = {
-  ownerAddress: string;
-  delegateAddress: string;
-  pendingDelegateAddress?: string;
-  pendingActiveFrom?: number;
-  cooldownSeconds?: number;
-  terminated?: boolean;
-};
-
-// How an operator holds a committee seat: with its DelegationContract (after
-// the EDF switch), with the contract's delegate key, or with a legacy member
-// EOA that carries the same operator label (before the switch).
-type SeatKind = "contract" | "delegate" | "legacy";
-
-// An oracle operator, identified by its DelegationContract.
-type Holder = {
-  contract: string;
-  label: string;
-  state?: DelegationState;
-  delegateBalanceEth?: number;
-  seats: Partial<Record<ModuleKey, SeatKind>>;
-  // Addresses whose telemetry belongs to this holder.
-  senders: string[];
-};
-
-type Member = {
-  address: string;
-  balanceEth: number;
-  // EDF DelegationContract state; unset for plain EOA members.
-  delegateAddress?: string;
-  ownerAddress?: string;
-  pendingDelegateAddress?: string;
-  pendingActiveFrom?: number;
-  cooldownSeconds?: number;
-  terminated?: boolean;
-  // Key that sent this member's latest telemetry and its balance on the
-  // DataBus network (Hoodi).
-  telemetryAddress?: string;
-  telemetryBalanceEth?: number;
-  lastSlots: Partial<Record<ModuleKey, number>>;
-};
-
-type BusMessage = {
-  blockNumber: number;
-  transactionHash: string;
-  sender: string;
-  memberAddress?: string;
-  holderAddress?: string;
-  chainId: number | null;
-  module: ModuleKey | "unknown";
-  event: TelemetryEvent;
-  version?: string;
-  kapiVersion?: string;
-  reportedDelegationContract?: string;
-  raw: string;
-  pretty: string;
-  ageSeconds: number;
-  timestamp: number;
-};
-
-type ChainConfig = {
-  secondsPerSlot: number;
-  genesisTime: number;
-};
-
-type NetworkSnapshot = {
-  members: Member[];
-  holders: Holder[];
-  frames: Partial<Record<ModuleKey, FrameInfo>>;
-  blockNumber: number;
-  messages: BusMessage[];
-  chainConfig: ChainConfig;
-  rpcUrl: string;
-};
-
-// Browser RPC endpoint chosen by the viewer per network; unset means the
-// first responding default endpoint. Stored in localStorage.
-type RpcChoice = Partial<Record<NetworkKey, string>>;
-
-type Snapshot = Record<NetworkKey, NetworkSnapshot>;
 
 type OracleReportsPayload = {
   contracts: Partial<Record<ModuleKey, string>>;
@@ -186,143 +95,10 @@ type RouteFilters = {
 const REPORT_PHASE_KEYS = REPORT_PHASES.map(({ key }) => key);
 const TELEMETRY_EVENT_KEYS = TELEMETRY_EVENT_KINDS.map(({ key }) => key);
 
-type NetworkConfig = {
-  label: string;
-  chainLabel: string;
-  rpc: readonly string[];
-  explorer: string;
-  consensus: Partial<Record<ModuleKey, string>> & { ao: string };
-};
-
 const MODULES = ORACLE_MODULES;
-
-const NETWORKS: Record<NetworkKey, NetworkConfig> = {
-  mainnet: {
-    label: "Mainnet",
-    chainLabel: "Ethereum",
-    rpc: BROWSER_RPCS.mainnet,
-    explorer: "https://etherscan.io",
-    consensus: CONSENSUS_CONTRACTS.mainnet,
-  },
-  hoodi: {
-    label: "Hoodi",
-    chainLabel: "Testnet",
-    rpc: BROWSER_RPCS.hoodi,
-    explorer: "https://hoodi.etherscan.io",
-    consensus: CONSENSUS_CONTRACTS.hoodi,
-  },
-};
-
-const DATABUS = "0x37De961D6bb5865867aDd416be07189D2Dd960e6";
-const DATABUS_EXPLORER = "https://hoodi.etherscan.io";
 const STALE_SECONDS = 24 * 60 * 60;
-// DataBus lookback in blocks (12s each): all messages for 7 days, startup
-// messages for 30 days because oracles restart rarely.
-const TELEMETRY_LOOKBACK_BLOCKS = 50_400;
-const STARTUP_LOOKBACK_BLOCKS = 216_000;
 const LOW_BALANCE_ETH = 0.4;
-const VIEW_ROUTES: Record<ViewKey, string> = {
-  overview: "/overview",
-  telemetry: "/telemetry",
-  oracle: "/reports",
-};
-const MEMBER_ABI = [
-  "function getMembers() view returns (address[] addresses, uint256[] lastReportedRefSlots)",
-  "function getChainConfig() view returns (uint256 slotsPerEpoch, uint256 secondsPerSlot, uint256 genesisTime)",
-  "function getCurrentFrame() view returns (uint256 refSlot, uint256 reportProcessingDeadlineSlot)",
-  "function getFrameConfig() view returns (uint256 initialEpoch, uint256 epochsPerFrame, uint256 fastLaneLengthSlots)",
-];
-const DELEGATION_ABI = [
-  "function getDelegate() view returns (address)",
-  "function owner() view returns (address)",
-  "function getPendingDelegate() view returns (address delegate, uint256 activeFrom)",
-  "function getCooldown() view returns (uint256)",
-  "function isTerminated() view returns (bool)",
-];
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
-
-// Operator names by oracle member address. Both the pre-EDF member EOAs and
-// the EDF DelegationContracts (LIP-37) are listed for Mainnet and Hoodi, so
-// the console keeps working across the switch.
-const LABELS: Record<string, string> = {
-  // Mainnet EDF DelegationContracts (added by vote #205)
-  "0xe75a431a98487dc69a14bdd13d858e3238e9c1b3": "Instadapp",
-  "0xc77d0bf3aa4778e36a89cdc8bbc9c34d8060637d": "Caliber",
-  "0xc7442d4d8f3ffea0fa4a18ad3062c8137ce21749": "Staking Facilities",
-  "0x56b3ea8016da18c6e8cd8135492d242f0de0dbbc":
-    "Bitwise",
-  "0x4e3f2deeb59eb9a205d82d17647b3e56422e0fee": "P2P",
-  "0xd524101c3c40f71fce7b9312d299603880a06bdb": "Chainlayer",
-  "0x99cd2ef33040879d40bbc77df81863d97f13c64d": "bloXroute",
-  "0xc4f2704273598d51a0ec76a31c12553ec8f5a891": "MatrixedLink",
-  "0x5e8ed9f10307ed6fa793a347e4d0f407d00b9c6f": "Stakefish",
-  // Mainnet pre-EDF member EOAs
-  "0x8db977c13caa938bc58464bfd622df0570564b78":
-    "Bitwise",
-  "0x404335bce530400a5814375e7ec1fb55faff3ea2": "Staking Facilities",
-  "0x042a9e5accfa17e28300f1b5967f20891e973922": "Stakefish",
-  "0x007de4a5f7bc37e2f26c0cb2e8a95006ee9b89b5": "P2P",
-  "0x61c91ecd902eb56e314bb2d5c5c07785444ea1c8": "bloXroute",
-  "0x73181107c8d9ed4ce0bbef7a0b4ccf3320c41d12": "Instadapp",
-  "0xc79f702202e3a6b0b6310b537e786b9acaa19baf": "Chainlayer",
-  "0xe57b3792adcc5da47ef4ff588883f0ee0c9835c9": "MatrixedLink",
-  "0x4118dad7f348a4063bd15786c299de2f3b1333f3": "Caliber",
-  // Hoodi pre-EDF member EOAs
-  "0x219743f1911d84b32599bdc2df21fc8dba6f81a2": "Staking Facilities",
-  "0xd3b1e36a372ca250eeff61f90e833ca070559970": "Stakefish",
-  "0x99b2b75f490ffc9a29e4e1f5987be8e30e690adf": "P2P",
-  "0xf7ae520e99ed3c41180b5e12681d31aa7302e4e5": "Chainlayer",
-  "0x4c75fa734a39f3a21c57e583c1c29942f021c6b7": "bloXroute",
-  "0xfe43a8b0b481ae9fb1862d31826532047d2d538c": "MatrixedLink",
-  "0x43c45c2455c49eed320f463ff4f1ece3d2bf5ae2": "Instadapp",
-  "0x1932f53b1457a5987791a40ba91f71c5efd5788f":
-    "Bitwise",
-  "0x948a62cc0414979dc7aa9364ba5b96ecb29f8736": "Caliber",
-  "0xca80ee7313a315879f326105134f938676cfd7a9": "Lido",
-  // Hoodi EDF DelegationContracts
-  "0x929de74c921f3e719ad2bb026edef747d443dc8e": "Instadapp",
-  "0x9f81976e461b82cfe3caec06de8efa8ad5543408": "Caliber",
-  "0x9950477b8d8154ef44745612832464c3c2155f79":
-    "Bitwise",
-  "0xc51fe2b136a24d6ec8368c858ae5211dc2fe0e0b": "Chainlayer",
-  "0x43c97fefef1e41d6429814e2a3ad37aa096d633e": "P2P",
-  "0xc19a08e427351f51da7a82136af66d8f01931738": "Staking Facilities",
-  "0x9d7bfaa500b5dec4fbab2257dfbc0cb3d5c1fbc8": "Stakefish",
-  "0x443e31892ffd51f6f0fef6dae4ac2e2795f311bf": "bloXroute",
-  "0x89e9fcb24cc82e9a449a69f3932c70ca2fa07e1d": "MatrixedLink",
-  "0xafca4694c06720ad03037db3760a920320037217": "Lido",
-};
-
-// EDF DelegationContracts of the oracle operators per network. The Holders
-// view starts from these contracts and reads the current delegate key from
-// the chain, so key rotations need no config change. Names come from LABELS.
-const HOLDER_CONTRACTS: Record<NetworkKey, readonly string[]> = {
-  // Vote #205 (LIP-37)
-  mainnet: [
-    "0xe75a431a98487dc69a14bdd13d858e3238e9c1b3",
-    "0xc77d0bf3aa4778e36a89cdc8bbc9c34d8060637d",
-    "0xc7442d4d8f3ffea0fa4a18ad3062c8137ce21749",
-    "0x56b3ea8016da18c6e8cd8135492d242f0de0dbbc",
-    "0x4e3f2deeb59eb9a205d82d17647b3e56422e0fee",
-    "0xd524101c3c40f71fce7b9312d299603880a06bdb",
-    "0x99cd2ef33040879d40bbc77df81863d97f13c64d",
-    "0xc4f2704273598d51a0ec76a31c12553ec8f5a891",
-    "0x5e8ed9f10307ed6fa793a347e4d0f407d00b9c6f",
-  ],
-  // Hoodi EDF/DSM v5 upgrade vote (2026-08-26)
-  hoodi: [
-    "0x929de74c921f3e719ad2bb026edef747d443dc8e",
-    "0x9f81976e461b82cfe3caec06de8efa8ad5543408",
-    "0x9950477b8d8154ef44745612832464c3c2155f79",
-    "0xc51fe2b136a24d6ec8368c858ae5211dc2fe0e0b",
-    "0x43c97fefef1e41d6429814e2a3ad37aa096d633e",
-    "0xc19a08e427351f51da7a82136af66d8f01931738",
-    "0x9d7bfaa500b5dec4fbab2257dfbc0cb3d5c1fbc8",
-    "0x443e31892ffd51f6f0fef6dae4ac2e2795f311bf",
-    "0x89e9fcb24cc82e9a449a69f3932c70ca2fa07e1d",
-    "0xafca4694c06720ad03037db3760a920320037217",
-  ],
-};
+const VIEW_ROUTES: Record<ViewKey, string> = { overview: "/overview", telemetry: "/telemetry", oracle: "/reports" };
 
 function shorten(value: string, head = 6, tail = 4) {
   return `${value.slice(0, head + 2)}…${value.slice(-tail)}`;
@@ -386,452 +162,6 @@ function holderContractFor(
   );
 }
 
-function safeJson(text: string) {
-  try {
-    return JSON.stringify(JSON.parse(text), null, 2);
-  } catch {
-    return text;
-  }
-}
-
-function chainIdFromMessage(raw: string) {
-  try {
-    const value = (JSON.parse(raw) as { chain_id?: unknown }).chain_id;
-    if (typeof value === "number" && Number.isFinite(value)) return value;
-    if (typeof value === "string" && /^\d+$/.test(value))
-      return Number(value);
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function decodeBytes(data: string) {
-  try {
-    const [bytes] = AbiCoder.defaultAbiCoder().decode(["bytes"], data);
-    const clean = bytes.slice(2);
-    const chars = clean.match(/.{1,2}/g) ?? [];
-    const decoded = new TextDecoder().decode(
-      new Uint8Array(chars.map((byte: string) => Number.parseInt(byte, 16))),
-    );
-    const start = decoded.search(/[\[{]/);
-    if (start < 0) return decoded.trim();
-    const close = decoded[start] === "{" ? "}" : "]";
-    const end = decoded.lastIndexOf(close);
-    return decoded.slice(start, end > start ? end + 1 : undefined);
-  } catch {
-    return data;
-  }
-}
-
-async function connect(rpcs: readonly string[]) {
-  let lastError: unknown;
-  for (const rpc of rpcs) {
-    try {
-      const provider = new JsonRpcProvider(rpc);
-      await provider.getBlockNumber();
-      return { provider, url: rpc };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError ?? new Error("No RPC endpoint responded");
-}
-
-// An explicit source is used alone; Auto retains the configured fallback list.
-function rpcCandidates(network: NetworkKey, choice: RpcChoice) {
-  const chosen = choice[network];
-  const defaults = NETWORKS[network].rpc;
-  return chosen ? [chosen] : defaults;
-}
-
-
-
-// Read the state of a DelegationContract; null when the address is not one
-// (a plain EOA member, or a contract without the EDF interface).
-async function readDelegation(
-  provider: JsonRpcProvider,
-  address: string,
-): Promise<DelegationState | null> {
-  try {
-    const delegation = new Contract(address, DELEGATION_ABI, provider);
-    // The delegate and owner identify the contract; the other fields are
-    // optional so one failing call does not hide the contract.
-    const [delegate, owner] = await Promise.all([
-      delegation.getDelegate(),
-      delegation.owner(),
-    ]);
-    const [pending, cooldown, terminated] = await Promise.allSettled([
-      delegation.getPendingDelegate(),
-      delegation.getCooldown(),
-      delegation.isTerminated(),
-    ]);
-    const pendingDelegate =
-      pending.status === "fulfilled"
-        ? (pending.value[0] as string).toLowerCase()
-        : ZERO_ADDRESS;
-    return {
-      delegateAddress: (delegate as string).toLowerCase(),
-      ownerAddress: (owner as string).toLowerCase(),
-      pendingDelegateAddress:
-        pendingDelegate === ZERO_ADDRESS ? undefined : pendingDelegate,
-      pendingActiveFrom:
-        pending.status === "fulfilled" && pendingDelegate !== ZERO_ADDRESS
-          ? Number(pending.value[1])
-          : undefined,
-      cooldownSeconds:
-        cooldown.status === "fulfilled" ? Number(cooldown.value) : undefined,
-      terminated:
-        terminated.status === "fulfilled" ? Boolean(terminated.value) : undefined,
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function readBalance(provider: JsonRpcProvider, address: string) {
-  return Number(formatEther(await provider.getBalance(address)));
-}
-
-// Holders are the operators' DelegationContracts. Membership is resolved per
-// module from the current HashConsensus members: the contract itself, its
-// delegate key, or a legacy EOA labelled with the same operator.
-async function fetchHolders(
-  provider: JsonRpcProvider,
-  network: NetworkKey,
-  members: Member[],
-): Promise<Holder[]> {
-  const holders = await Promise.all(
-    HOLDER_CONTRACTS[network].map(async (contract) => {
-      const label = LABELS[contract] ?? shorten(contract, 6, 4);
-      const state = (await readDelegation(provider, contract)) ?? undefined;
-      const delegateBalanceEth = state
-        ? await readBalance(provider, state.delegateAddress).catch(
-            () => undefined,
-          )
-        : undefined;
-      const legacyMembers = members.filter(
-        (member) =>
-          member.address !== contract &&
-          member.address !== state?.delegateAddress &&
-          LABELS[member.address] === label,
-      );
-      const seats: Holder["seats"] = {};
-      for (const { key } of MODULES) {
-        const holds = (address: string | undefined) =>
-          address !== undefined &&
-          members.some(
-            (member) =>
-              member.address === address && member.lastSlots[key] !== undefined,
-          );
-        if (holds(contract)) seats[key] = "contract";
-        else if (holds(state?.delegateAddress)) seats[key] = "delegate";
-        else if (
-          legacyMembers.some((member) => member.lastSlots[key] !== undefined)
-        )
-          seats[key] = "legacy";
-      }
-      const senders = [
-        contract,
-        ...(state ? [state.delegateAddress] : []),
-        ...legacyMembers.map((member) => member.address),
-      ];
-      return { contract, label, state, delegateBalanceEth, seats, senders };
-    }),
-  );
-  return holders.sort((a, b) => a.label.localeCompare(b.label));
-}
-
-async function fetchMembers(
-  provider: JsonRpcProvider,
-  contracts: NetworkConfig["consensus"],
-) {
-  const moduleResults = await Promise.all(
-    availableModules(contracts).map(async ({ key }) => {
-      const contract = new Contract(
-        contracts[key] as string,
-        MEMBER_ABI,
-        provider,
-      );
-      const [[addresses, slots], currentFrame, [, epochsPerFrame]] =
-        await Promise.all([
-          contract.getMembers(),
-          readConsensusFrame(() => contract.getCurrentFrame()),
-          contract.getFrameConfig(),
-        ]);
-      return {
-        key,
-        values: (addresses as string[]).map((address, index) => ({
-          address: address.toLowerCase(),
-          slot: Number(slots[index]),
-        })),
-        frame: currentFrame === null ? null : {
-          refSlot: Number(currentFrame[0]),
-          epochsPerFrame: Number(epochsPerFrame),
-          deadlineSlot: Number(currentFrame[1]),
-        },
-      };
-    }),
-  );
-
-  const merged = new Map<string, Member>();
-  for (const result of moduleResults) {
-    for (const value of result.values) {
-      const member = merged.get(value.address) ?? {
-        address: value.address,
-        balanceEth: 0,
-        lastSlots: {},
-      };
-      member.lastSlots[result.key] = value.slot;
-      merged.set(value.address, member);
-    }
-  }
-
-  const members = [...merged.values()];
-  const chainContract = new Contract(contracts.ao, MEMBER_ABI, provider);
-  const [[slotsPerEpoch, secondsPerSlot, genesisTime], resolvedMembers] = await Promise.all([
-    chainContract.getChainConfig(),
-    Promise.all(
-      members.map(async (member) => {
-        const state = await readDelegation(provider, member.address);
-        return state ? { ...member, ...state } : member;
-      }),
-    ),
-  ]);
-  const balances = await Promise.all(
-    resolvedMembers.map(async (member) => ({
-      address: member.address,
-      balanceEth: Number(
-        formatEther(
-          await provider.getBalance(member.delegateAddress ?? member.address),
-        ),
-      ),
-    })),
-  );
-  balances.forEach(({ address, balanceEth }) => {
-    const member = merged.get(address);
-    if (member) member.balanceEth = balanceEth;
-  });
-  resolvedMembers.forEach((resolved) => {
-    const member = merged.get(resolved.address);
-    if (!member) return;
-    member.delegateAddress = resolved.delegateAddress;
-    member.ownerAddress = resolved.ownerAddress;
-    member.pendingDelegateAddress = resolved.pendingDelegateAddress;
-    member.pendingActiveFrom = resolved.pendingActiveFrom;
-    member.cooldownSeconds = resolved.cooldownSeconds;
-    member.terminated = resolved.terminated;
-  });
-
-  return {
-    members: [...merged.values()].sort((a, b) =>
-      (LABELS[a.address] ?? a.address).localeCompare(
-        LABELS[b.address] ?? b.address,
-      ),
-    ),
-    chainConfig: {
-      secondsPerSlot: Number(secondsPerSlot),
-      genesisTime: Number(genesisTime),
-    },
-    frames: Object.fromEntries(
-      moduleResults.map(({ key, frame }) => [
-        key,
-        frame === null ? { notStarted: true } : {
-          refSlot: frame.refSlot,
-          previousRefSlot:
-            frame.refSlot - frame.epochsPerFrame * Number(slotsPerEpoch),
-          deadlineSlot: frame.deadlineSlot,
-        } satisfies FrameInfo,
-      ]),
-    ) as Partial<Record<ModuleKey, FrameInfo>>,
-  };
-}
-
-async function fetchLogRanges(
-  provider: JsonRpcProvider,
-  filter: { address: string; topics?: string[] },
-  fromBlock: number,
-  toBlock: number,
-  chunkSize: number,
-) {
-  const chunks: Array<{ fromBlock: number; toBlock: number }> = [];
-  for (let lo = fromBlock; lo <= toBlock; lo += chunkSize) {
-    chunks.push({ fromBlock: lo, toBlock: Math.min(lo + chunkSize - 1, toBlock) });
-  }
-
-  const logs: Log[] = [];
-  for (let index = 0; index < chunks.length; index += 6) {
-    const group = chunks.slice(index, index + 6);
-    const results = await Promise.allSettled(
-      group.map((range) => provider.getLogs({ ...filter, ...range })),
-    );
-    results.forEach((result) => {
-      if (result.status === "fulfilled") logs.push(...result.value);
-    });
-  }
-  return logs;
-}
-
-async function fetchDataBus(provider: JsonRpcProvider) {
-  const latest = await provider.getBlock("latest");
-  if (!latest) throw new Error("Latest Hoodi block was unavailable");
-  const from = Math.max(0, latest.number - TELEMETRY_LOOKBACK_BLOCKS);
-  const startupFrom = Math.max(0, latest.number - STARTUP_LOOKBACK_BLOCKS);
-  const [logs, startupLogs] = await Promise.all([
-    fetchLogRanges(provider, { address: DATABUS }, from, latest.number, 2_000),
-    startupFrom < from
-      ? fetchLogRanges(
-          provider,
-          { address: DATABUS, topics: [ORACLE_STARTUP_TOPIC] },
-          startupFrom,
-          from - 1,
-          10_000,
-        )
-      : Promise.resolve([] as Log[]),
-  ]);
-
-  return [...logs, ...startupLogs]
-    .map((log) => {
-      const raw = decodeBytes(log.data);
-      const sender = log.topics[1]
-        ? `0x${log.topics[1].slice(-40)}`.toLowerCase()
-        : "unknown";
-      const ageSeconds = Math.max(0, (latest.number - log.blockNumber) * 12);
-      const setup = parseTelemetrySetup(raw);
-      return {
-        blockNumber: log.blockNumber,
-        transactionHash: log.transactionHash,
-        sender,
-        chainId: chainIdFromMessage(raw),
-        module: moduleFromMessage(raw, log.topics[0] ?? ""),
-        event: telemetryEventFromTopic(log.topics[0] ?? ""),
-        version: setup.version,
-        kapiVersion: setup.kapiVersion,
-        reportedDelegationContract: setup.delegationContract,
-        raw,
-        pretty: safeJson(raw),
-        ageSeconds,
-        timestamp: latest.timestamp - ageSeconds,
-      } satisfies BusMessage;
-    })
-    .sort((a, b) => b.blockNumber - a.blockNumber);
-}
-
-async function fetchSnapshot(choice: RpcChoice): Promise<Snapshot> {
-  const [mainnet, hoodi] = await Promise.all([
-    connect(rpcCandidates("mainnet", choice)),
-    connect(rpcCandidates("hoodi", choice)),
-  ]);
-  const mainnetProvider = mainnet.provider;
-  const hoodiProvider = hoodi.provider;
-  const [
-    mainnetMembership,
-    hoodiMembership,
-    mainnetBlock,
-    hoodiBlock,
-    messages,
-  ] =
-    await Promise.all([
-      fetchMembers(mainnetProvider, NETWORKS.mainnet.consensus),
-      fetchMembers(hoodiProvider, NETWORKS.hoodi.consensus),
-      mainnetProvider.getBlockNumber(),
-      hoodiProvider.getBlockNumber(),
-      fetchDataBus(hoodiProvider),
-    ]);
-
-  const [mainnetHolders, hoodiHolders] = await Promise.all([
-    fetchHolders(mainnetProvider, "mainnet", mainnetMembership.members),
-    fetchHolders(hoodiProvider, "hoodi", hoodiMembership.members),
-  ]);
-
-  // Attribute each message to the member (for the participation views) and
-  // to the holder (for the Holders view) that own the sending key.
-  const attachMembersToTelemetry = (
-    chainId: number,
-    members: Member[],
-    holders: Holder[],
-  ) => {
-    const memberByDelegate = new Map(
-      members.map((member) => [
-        member.delegateAddress ?? member.address,
-        member.address,
-      ]),
-    );
-    const holderBySender = new Map(
-      holders.flatMap((holder) =>
-        holder.senders.map((sender) => [sender, holder.contract] as const),
-      ),
-    );
-    return messages.flatMap((message) => {
-      if (message.chainId !== chainId) return [];
-      const memberAddress = memberByDelegate.get(message.sender);
-      const holderAddress = holderBySender.get(message.sender);
-      return memberAddress || holderAddress
-        ? [{ ...message, memberAddress, holderAddress }]
-        : [];
-    });
-  };
-  const mainnetMessages = attachMembersToTelemetry(
-    MAINNET_CHAIN_ID,
-    mainnetMembership.members,
-    mainnetHolders,
-  );
-  const hoodiMessages = attachMembersToTelemetry(
-    HOODI_CHAIN_ID,
-    hoodiMembership.members,
-    hoodiHolders,
-  );
-
-  // The telemetry key lives on the DataBus network (Hoodi) for both oracle
-  // networks; its balance is read there.
-  const attachTelemetryBalances = async (
-    members: Member[],
-    attached: BusMessage[],
-  ) => {
-    const senderByMember = new Map<string, string>();
-    for (const message of attached) {
-      if (message.memberAddress && !senderByMember.has(message.memberAddress)) {
-        senderByMember.set(message.memberAddress, message.sender);
-      }
-    }
-    await Promise.all(
-      members.map(async (member) => {
-        const sender = senderByMember.get(member.address);
-        if (!sender) return;
-        member.telemetryAddress = sender;
-        member.telemetryBalanceEth = await readBalance(hoodiProvider, sender).catch(
-          () => undefined,
-        );
-      }),
-    );
-  };
-  await Promise.all([
-    attachTelemetryBalances(mainnetMembership.members, mainnetMessages),
-    attachTelemetryBalances(hoodiMembership.members, hoodiMessages),
-  ]);
-
-  return {
-    mainnet: {
-      members: mainnetMembership.members,
-      holders: mainnetHolders,
-      frames: mainnetMembership.frames,
-      blockNumber: mainnetBlock,
-      messages: mainnetMessages,
-      chainConfig: mainnetMembership.chainConfig,
-      rpcUrl: mainnet.url,
-    },
-    hoodi: {
-      members: hoodiMembership.members,
-      holders: hoodiHolders,
-      frames: hoodiMembership.frames,
-      blockNumber: hoodiBlock,
-      messages: hoodiMessages,
-      chainConfig: hoodiMembership.chainConfig,
-      rpcUrl: hoodi.url,
-    },
-  };
-}
-
 function formatDuration(seconds: number) {
   if (seconds % 86400 === 0) return plural(seconds / 86400, "day");
   if (seconds % 3600 === 0) return plural(seconds / 3600, "hour");
@@ -872,6 +202,24 @@ function ModulePill({ module }: { module: ModuleKey | "unknown" }) {
 
 function eventLabel(event: TelemetryEvent) {
   return TELEMETRY_EVENT_KINDS.find((item) => item.key === event)?.label ?? "Other";
+}
+
+function TelemetryReadiness({ module, message, frame }: { module: ModuleKey | "unknown"; message?: BusMessage; frame?: FrameInfo }) {
+  if (!["csm", "csm_0x02", "cm"].includes(module)) return null;
+  const value = message ? telemetryReadiness(message.raw, module, frame?.epochsPerFrame) : null;
+  const label = module === "cm" ? "CMv2" : MODULES.find(item => item.key === module)?.label;
+  const inactive = frame && "notStarted" in frame;
+  const stale = !!message && message.ageSeconds > STALE_SECONDS;
+  return <div className={`readiness ${stale ? "stale" : ""}`}>
+    <div className="readiness-heading"><span>Data ready</span><strong>{!inactive && value ? `${Math.floor(value.percent * 10) / 10}%` : "—"}</strong></div>
+    {!inactive && value ? <>
+      <div className="readiness-track" role="progressbar" aria-label={`${label} data readiness`} aria-valuemin={0} aria-valuemax={value.total} aria-valuenow={value.ready} aria-valuetext={`${value.ready.toLocaleString()} of ${value.total.toLocaleString()} epochs ready`}>
+        <span style={{ width: `${value.percent}%` }} />
+      </div>
+      <span className="readiness-count">{value.ready.toLocaleString()} / {value.total.toLocaleString()} epochs</span>
+    </> : <span className="readiness-count">{inactive ? "Frame has not started" : !message ? "No diagnostic telemetry" : !frame?.epochsPerFrame ? "Frame size unavailable" : "Ready value unavailable"}</span>}
+    {message && <a className="readiness-source" href={`${DATABUS_EXPLORER}/tx/${message.transactionHash}`} target="_blank" rel="noreferrer" title={formatTime(message.timestamp)}>{stale ? "Stale diagnostic" : "Diagnostic"} · {relativeTime(message.ageSeconds)} <ExternalLink size={9} /></a>}
+  </div>;
 }
 
 type FilterOption<T extends string> = {
@@ -1405,7 +753,7 @@ export default function OracleMonitor() {
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState(false);
 
-  useLoadingTask(network,"Oracle members and telemetry",loading,!!error);
+  useLoadingTask(network,"Oracle members and telemetry",loading,!!error||!!snapshot?.[network].warnings.length);
   useLoadingTask(network,"Oracle reports",view==="oracle"&&(oracleLoading||(!oraclePayloads[`${network}:${hashVoteFrames}`]&&!oracleError)),view==="oracle"&&(!!oracleError||!!oraclePayloads[`${network}:${hashVoteFrames}`]?.warnings?.length));
   const routeFor = useCallback(
     (
@@ -1542,32 +890,34 @@ export default function OracleMonitor() {
   );
   const rpcChoice = useMemo(() => parseRpcChoice(rpcChoiceRaw), [rpcChoiceRaw]);
 
+  const collectionController = useRef<AbortController|null>(null);
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+    collectionController.current?.abort();
+    const controller=new AbortController();collectionController.current=controller;
+    setLoading(true);setError(null);
+    const mode=view==='telemetry'?'telemetry':'overview';
+    const headers=new Headers();
+    for(const n of ['mainnet','hoodi'] as const){const preset=RPC_OPTIONS[n].find(option=>option.url===rpcChoice[n]);if(preset)headers.set(`x-lido-${n}-rpc`,preset.id);}
+    const prefix=window.location.pathname.startsWith('/oracle')?'/oracle':'';
     try {
-      const next = await fetchSnapshot(rpcChoice);
-      setSnapshot(next);
-      setUpdatedAt(new Date());
-    } catch (loadError) {
-      setError(
-        loadError instanceof Error
-          ? loadError.message
-          : "Unable to load onchain state",
-      );
-    } finally {
-      setLoading(false);
-    }
-  }, [rpcChoice]);
-
-  useEffect(() => {
-    const initial = window.setTimeout(() => void load(), 0);
-    const timer = window.setInterval(load, DATA_REFRESH_INTERVAL_MS);
-    return () => {
-      window.clearTimeout(initial);
-      window.clearInterval(timer);
-    };
-  }, [load]);
+      for(;;){
+        const response=await rpcFetch(`${prefix}/api/oracle-snapshot?network=${network}&mode=${mode}`,{headers,signal:controller.signal});
+        const next=await response.json() as OracleSnapshotResult;
+        if(!response.ok||next.status==='error')throw new Error(next.error??'Could not load Oracle data.');
+        if(controller.signal.aborted)return;
+        if(next.snapshot){setSnapshot(next.snapshot);setUpdatedAt(new Date(next.storedAt));}
+        if(next.status==='ready')break;
+        await waitForRetry(2000,controller.signal);
+      }
+    } catch(loadError){
+      if(!controller.signal.aborted)setError(loadError instanceof Error?loadError.message:'Unable to load onchain state');
+    } finally {if(!controller.signal.aborted)setLoading(false);}
+  },[rpcChoice,network,view]);
+  useEffect(()=>{
+    const initial=setTimeout(()=>void load(),0);
+    const timer=setInterval(()=>{if(!document.hidden)void load();},DATA_REFRESH_INTERVAL_MS);
+    return()=>{clearTimeout(initial);clearInterval(timer);collectionController.current?.abort();};
+  },[load]);
 
   const oraclePayloadKey = `${network}:${hashVoteFrames}`;
   useAutoRetry(view==='oracle'&&(!!oracleError||!!oraclePayloads[oraclePayloadKey]?.warnings?.length),oracleLoading,()=>setReportRetry(n=>n+1),`${oraclePayloadKey}:${view}`);
@@ -1643,6 +993,21 @@ export default function OracleMonitor() {
       const modules = map.get(message.memberAddress) ?? new Map();
       if (!modules.has(message.module)) modules.set(message.module, message);
       map.set(message.memberAddress, modules);
+    }
+    return map;
+  }, [data]);
+
+  const readinessMessages = useMemo(() => {
+    const map = new Map<string, Map<ModuleKey, BusMessage>>();
+    for (const message of data?.messages ?? []) {
+      if (message.module === "unknown" || message.event !== "diagnostic") continue;
+      for (const address of [message.memberAddress, message.holderAddress]) {
+        if (!address) continue;
+        const modules = map.get(address) ?? new Map<ModuleKey, BusMessage>();
+        const previous = modules.get(message.module);
+        if (!previous || message.timestamp > previous.timestamp || (message.timestamp === previous.timestamp && message.blockNumber > previous.blockNumber)) modules.set(message.module, message);
+        map.set(address, modules);
+      }
     }
     return map;
   }, [data]);
@@ -1728,7 +1093,7 @@ export default function OracleMonitor() {
   // On Mainnet the telemetry key is separate from the oracle wallet, so a
   // member without a known telemetry key counts as a wallet to check.
   const missingTelemetryBalanceCount =
-    network === "mainnet"
+    network === "mainnet" && !data?.telemetryLoading
       ? (data?.members.filter(
           (member) => member.telemetryBalanceEth === undefined,
         ).length ?? 0)
@@ -1898,10 +1263,12 @@ export default function OracleMonitor() {
       <NetworkBar network={network} label="Oracle network" onChange={key => {
         setSelectedReport(null); setSelectedOracleReport(null); navigate(view, key);
       }}/>
+      {error && snapshot && <div className="report-warning" role="alert">Refresh failed: {error} Showing the last successful snapshot.</div>}
+      {snapshot?.[network].warnings.map(warning => <div className="report-warning" role="status" key={warning}>{warning}</div>)}
 
-      {loading && !snapshot ? (
+      {loading && (!snapshot || (view==="telemetry"&&!snapshot[network].fullHistoryLoaded)) ? (
         <LoadingState />
-      ) : error && !snapshot ? (
+      ) : error && (!snapshot || (view==="telemetry"&&!snapshot[network].fullHistoryLoaded)) ? (
         <section className="error-state">
           <AlertTriangle size={22} />
           <div>
@@ -1954,8 +1321,8 @@ export default function OracleMonitor() {
               </div>
               <div className={`metric ${staleCount ? "warning" : "healthy"}`}>
                 <span>Telemetry breaches</span>
-                <strong>{staleCount}</strong>
-                <small>{staleCount ? "silent over 24h" : "all current"}</small>
+                <strong>{data.telemetryLoading ? "—" : staleCount}</strong>
+                <small>{data.telemetryLoading ? "Loading telemetry…" : staleCount ? "silent over 24h" : "all current"}</small>
               </div>
             </div>
 
@@ -2141,7 +1508,7 @@ export default function OracleMonitor() {
                             // reported + telemetry, reported only, telemetry
                             // only, nothing.
                             const tone =
-                              vote === "not-started"
+                              data.telemetryLoading ? "pending" : vote === "not-started"
                                 ? "pending"
                                 : vote === "unknown"
                                 ? recent
@@ -2164,7 +1531,7 @@ export default function OracleMonitor() {
                                     : vote === "not-started"
                                       ? "Not started · initial epoch has not arrived"
                                       : "Not in this committee";
-                            const telemetryText = message
+                            const telemetryText = data.telemetryLoading ? "Loading telemetry…" : message
                               ? recent
                                 ? `Telemetry ${relativeTime(message.ageSeconds)} · #${message.blockNumber.toLocaleString()}`
                                 : `Telemetry silent · last ${relativeTime(message.ageSeconds)}`
@@ -2218,6 +1585,7 @@ export default function OracleMonitor() {
                                       {telemetryText}
                                     </span>
                                   )}
+                                  {slot !== undefined && !data.telemetryLoading && <TelemetryReadiness module={key} frame={frame} message={readinessMessages.get(member.address)?.get(key) ?? (holder ? readinessMessages.get(holder.contract)?.get(key) : undefined)} />}
                                   {(version || kapiVersion) && (
                                     <span className="slot-versions">
                                       {version ?? "—"} · KAPI {kapiVersion ?? "—"}
@@ -2450,6 +1818,7 @@ export default function OracleMonitor() {
                         </a>
                       </div>
                     </div>
+                    {visibleReport.event === "diagnostic" && <TelemetryReadiness module={visibleReport.module} message={visibleReport} frame={visibleReport.module === "unknown" ? undefined : data?.frames[visibleReport.module]} />}
                     <pre className="json-view compact">
                       {visibleReport.pretty}
                     </pre>

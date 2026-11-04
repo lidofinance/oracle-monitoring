@@ -4,6 +4,7 @@ import { useRef, type ReactNode } from "react";
 import HomeLink from "./home-link";
 import RpcPicker from "./rpc-client";
 import LoadingStatus from "./loading-status";
+import ThemeToggle from "./theme-toggle";
 import "./site-header.css";
 import "./numeric-typography.css";
 
@@ -26,7 +27,7 @@ export default function SiteHeader({ network, title, subtitle, icon, actions, na
         <div className="site-header-title"><strong>{title}</strong><span>{subtitle}</span></div>
       </div>
       {navigation && <div className="site-header-navigation">{navigation}</div>}
-      <div className="site-header-actions"><LoadingStatus network={network} home={home}/>{actions}</div>
+      <div className="site-header-actions"><LoadingStatus network={network} home={home}/><ThemeToggle />{actions}</div>
     </div>
   </header>;
 }

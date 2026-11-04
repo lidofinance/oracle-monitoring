@@ -17,7 +17,7 @@ const LOCATOR = new Interface(["function depositSecurityModule() view returns(ad
 type Block = { number: string; timestamp: string };
 type Tx = { to: string | null; from: string; input: string; blockNumber: string };
 type Receipt = { status: string; gasUsed: string; effectiveGasPrice: string; logs: CouncilLog[] };
-const endpointLists = (chain: CouncilChain): readonly string[] => chain === "ethereum" ? serverRpcs("mainnet") : chain === "hoodi" ? serverRpcs("hoodi") : chain === "chiado" ? parseRpcList(process.env.CHIADO_RPC_URLS, ["https://rpc.chiadochain.net", "https://gnosis-chiado-rpc.publicnode.com"]) : chain === "gnosis"
+const endpointLists = (chain: CouncilChain): readonly string[] => chain === "ethereum" ? serverRpcs("mainnet") : chain === "hoodi" ? serverRpcs("hoodi") : chain === "gnosis"
   ? parseRpcList(process.env.GNOSIS_RPC_URLS, ["https://rpc.gnosischain.com", "https://gnosis-rpc.publicnode.com"])
   : parseRpcList(process.env.POLYGON_RPC_URLS, ["https://polygon-bor-rpc.publicnode.com", "https://polygon.drpc.org"]);
 
@@ -126,14 +126,23 @@ async function loadSnapshot(network: CouncilNetwork): Promise<CouncilSnapshot> {
       if (code === "0x") wallet = address;
       else warnings.push(`Could not resolve the active wallet for guardian ${address}.`);
     }
+    const label = config.labels[address.toLowerCase()];
     const balances = Object.fromEntries(await Promise.all(CHAINS.map(async chain => {
       const chainHead = heads[chain];
       const balance = wallet && chainHead ? await optional(() => clients[chain].rpc<string>("eth_getBalance", [wallet, hex(chainHead.block)])) : null;
       if (balance === null && wallet && chainHead) warnings.push(`Some ${COUNCIL_CHAINS[chain].name} wallet balances are unavailable.`);
       return [chain, balance === null ? null : formatEther(BigInt(balance))];
     }))) as CouncilGuardian["balances"];
-    const label = config.labels[address.toLowerCase()];
-    return { address: address.toLowerCase(), name: label?.name ?? `Guardian ${addresses.indexOf(address) + 1}`, wallet: wallet?.toLowerCase() ?? null, owner: owner?.toLowerCase() ?? null, terminated, pendingDelegate: pending && pending.address !== ZERO ? pending.address.toLowerCase() : null, pendingFrom: pending?.from ?? null, legacy: label?.legacy ?? null, balances };
+    // Old DataBus wallets can retain funds after an EDF delegate rotation.
+    // Keep these separate: their balance does not fund the active delegate.
+    const legacyBalances = Object.fromEntries(await Promise.all(config.busChains.map(async chain => {
+      const chainHead = heads[chain], legacy = label?.legacy;
+      if (legacy?.toLowerCase() === wallet?.toLowerCase()) return [chain, balances[chain] ?? null];
+      const value = legacy && chainHead ? await optional(() => clients[chain].rpc<string>("eth_getBalance", [legacy, hex(chainHead.block)])) : null;
+      if (value === null && legacy && chainHead) warnings.push(`Some ${COUNCIL_CHAINS[chain].name} pre-EDF wallet balances are unavailable.`);
+      return [chain, value === null ? null : formatEther(BigInt(value))];
+    }))) as CouncilGuardian["legacyBalances"];
+    return { address: address.toLowerCase(), name: label?.name ?? `Guardian ${addresses.indexOf(address) + 1}`, wallet: wallet?.toLowerCase() ?? null, owner: owner?.toLowerCase() ?? null, terminated, pendingDelegate: pending && pending.address !== ZERO ? pending.address.toLowerCase() : null, pendingFrom: pending?.from ?? null, legacy: label?.legacy ?? null, balances, legacyBalances };
   });
   const lastDeposit = lastDepositBlock && Number(lastDepositBlock) > 0 ? await optional(() => eth.block(Number(lastDepositBlock))) : null;
   return { network, updatedAt: Math.floor(Date.now() / 1000), dsm, quorum: Number(quorum), paused: Boolean(paused), guardians, heads, lastDeposit, pauseValidityBlocks: validity === null ? null : Number(validity), maxOperatorsPerUnvet: maxOperators === null ? null : Number(maxOperators), warnings: [...new Set(warnings)] };

@@ -108,6 +108,20 @@ export function parseTelemetrySetup(raw: string): TelemetrySetup {
   }
 }
 
+// Diagnostic readiness counts epochs, not a percentage. The denominator must
+// come from this module's HashConsensus rather than a shared frame duration.
+export function telemetryReadiness(raw: string, module: OracleModule | "unknown", frameEpochs: number | undefined) {
+  if (!["csm", "csm_0x02", "cm"].includes(module) ||
+      !Number.isSafeInteger(frameEpochs) || !frameEpochs || frameEpochs < 0) return null;
+  try {
+    const value: unknown = JSON.parse(raw)?.data?.ready;
+    const ready = typeof value === "number" ? value :
+      typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+    if (!Number.isSafeInteger(ready) || ready < 0 || ready > frameEpochs) return null;
+    return { ready, total: frameEpochs, percent: ready / frameEpochs * 100 };
+  } catch { return null; }
+}
+
 export function moduleFromMessage(
   raw: string,
   topic: string,

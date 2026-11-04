@@ -7,6 +7,7 @@ import {
   isOracleModule,
   moduleFromMessage,
   parseTelemetrySetup,
+  telemetryReadiness,
   telemetryEventFromTopic,
 } from "../app/oracle-modules.ts";
 
@@ -98,4 +99,26 @@ test("startup telemetry exposes the oracle setup", () => {
     delegationContract: undefined,
   });
   assert.deepEqual(parseTelemetrySetup("not json"), {});
+});
+
+test("performance readiness uses the selected module's onchain frame size in epochs", () => {
+  const payload = JSON.stringify({ data: { ready: 75 } });
+  const csm = telemetryReadiness(payload, "csm", 225);
+  assert.equal(csm.ready, 75);
+  assert.equal(csm.total, 225);
+  assert.ok(Math.abs(csm.percent - 100/3) < 1e-10);
+  assert.deepEqual(telemetryReadiness(payload, "csm_0x02", 100), {ready:75,total:100,percent:75});
+  assert.deepEqual(telemetryReadiness(payload, "cm", 300), {ready:75,total:300,percent:25});
+  assert.equal(telemetryReadiness(payload, "ao", 225), null);
+  assert.equal(telemetryReadiness(payload, "vebo", 225), null);
+});
+
+test("zero and complete readiness are distinct from missing or malformed diagnostics", () => {
+  assert.deepEqual(telemetryReadiness('{"data":{"ready":0}}', 'csm', 225), {ready:0,total:225,percent:0});
+  assert.deepEqual(telemetryReadiness('{"data":{"ready":"225"}}', 'cm', 225), {ready:225,total:225,percent:100});
+  for (const value of [null, true, false, '', ' ', '1.5', -1, 1.5, 226, {}, []]) {
+    assert.equal(telemetryReadiness(JSON.stringify({data:{ready:value}}), 'csm', 225), null);
+  }
+  for (const frame of [undefined, 0, -1, 2.5, Infinity]) assert.equal(telemetryReadiness('{"data":{"ready":0}}', 'csm', frame), null);
+  for (const raw of ['not JSON', '{}', 'null', '{"data":{}}']) assert.equal(telemetryReadiness(raw, 'cm', 225), null);
 });

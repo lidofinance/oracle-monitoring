@@ -82,10 +82,11 @@ test('Council networks isolate execution contracts, guardian aliases and message
   const mainnet = COUNCIL_NETWORKS.mainnet, hoodi = COUNCIL_NETWORKS.hoodi;
   assert.notEqual(mainnet.locator.toLowerCase(), hoodi.locator.toLowerCase());
   assert.equal(COUNCIL_CHAINS[hoodi.executionChain].chainId, 560048);
-  assert.deepEqual(hoodi.busChains.map(c => COUNCIL_CHAINS[c].chainId), [10200]);
+  assert.deepEqual(hoodi.busChains.map(c => COUNCIL_CHAINS[c].chainId), [100]);
   for (const address of Object.keys(hoodi.labels)) assert.equal(mainnet.labels[address], undefined);
-  for (const chain of hoodi.balanceChains) assert.equal(mainnet.balanceChains.includes(chain), false);
+  assert.deepEqual(hoodi.balanceChains, ['hoodi', 'gnosis']);
+  assert.deepEqual(hoodi.busChains, ['gnosis']);
   const ping = parseCouncilBus(bus('MessagePingV1', [123n, [encodeBytes32String('4.1.2')]]), hoodi.busChains[0], 1000);
-  assert.equal(ping.chain, 'chiado');
-  assert.match(COUNCIL_CHAINS[ping.chain].explorer, /chiado/);
+  assert.equal(ping.chain, 'gnosis');
+  assert.equal(COUNCIL_CHAINS[ping.chain].explorer, 'https://gnosis.blockscout.com');
 });
